@@ -9,6 +9,7 @@ __pycache__/
 .pytest_cache/
 
 # Compiled binaries
+asv4
 v3/cpp/asv3
 v3/cpp/zstd_capi_bench
 *.o

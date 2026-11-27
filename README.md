@@ -18,7 +18,7 @@ flowchart LR
     IN["Input Stream (stdin/file)"] --> FG["16 MB Flush Group + SHA-256"]
     FG --> SEG["Coupled Stage 1 & 2: NEON M(L) + Per-Plane zstd-1 + Viterbi DP + LDM/zstd-3 Gates"]
     SEG -->|"T0 (Fallback)"| RAW["S_RAW (Persistent zstd --long)"]
-    SEG -->|"T1 / T2_XOR / T2_ELEM / T2_BIT / T2_NIBROT"| XF["Fused NEON Transform -> S_XFORM (Persistent zstd)"]
+    SEG -->|"T1 / T2_XOR / T2_ELEM / T2_BIT / T2_NIBROT"| XF["Fused NEON Transform → S_XFORM (Persistent zstd)"]
     RAW --> OUT["Pipe-Safe Interleaved ASV3/v4 Stream + 32 B SHA-256 Trailer"]
     XF --> OUT
 ```
@@ -67,42 +67,42 @@ See **[`ARCHITECTURE.md`](ARCHITECTURE.md)** for full Mermaid diagrams of the tw
 ## Quickstart
 
 ### Build (macOS Apple Silicon or Linux x86-64/ARM64)
-Requires a C++20 compiler (`clang++` or `g++`) and `libzstd` (`>= 1.5`).
+Requires a C++20 compiler (`clang++` or `g++`) and `libzstd` (`>= 1.5`). The top-level [`Makefile`](Makefile) auto-detects Homebrew, Conda, or system `libzstd` paths and builds `./asv4` (from [`v3/cpp/asv3.cpp`](v3/cpp/asv3.cpp), which retains the `v3/` directory for historical continuity).
 
 ```bash
-# macOS (adjust -I/-L if using Homebrew /opt/homebrew or conda /opt/anaconda3)
-clang++ -O3 -std=c++20 -mcpu=native -Wall -Wextra \
-  -I/opt/anaconda3/include -L/opt/anaconda3/lib -Wl,-rpath,/opt/anaconda3/lib \
-  v3/cpp/asv3.cpp -lzstd -o v3/cpp/asv3
+# Build ./asv4 (and v3/cpp/asv3)
+make
 
-# Linux (uses built-in portable FIPS 180-4 SHA-256 automatically)
-g++ -O3 -std=c++20 -march=native -Wall -Wextra \
-  v3/cpp/asv3.cpp -lzstd -o v3/cpp/asv3
+# Run UBSan + portable FIPS 180-4 SHA-256 + Unix pipe smoke test
+make test
 ```
 
 ### Usage (Files or Unix Pipes)
 ```bash
 # Compress & decompress files (automatic streaming SHA-256 verification on decode)
-./v3/cpp/asv3 c --level 3 model.safetensors model.asv4
-./v3/cpp/asv3 d model.asv4 model.restored
+./asv4 c --level 3 model.safetensors model.asv4
+./asv4 d model.asv4 model.restored
 
 # Pipe-safe streaming (zero backward seeks)
-cat model.safetensors | ./v3/cpp/asv3 c --level 3 | ./v3/cpp/asv3 d > /dev/null
+cat model.safetensors | ./asv4 c --level 3 | ./asv4 d > /dev/null
 
 # Archival preset (--level 19, guaranteed <= --level 3) with JSON stats & trace
-./v3/cpp/asv3 c --level 19 --stats stats.json --trace input.bin output.asv4
+./asv4 c --level 19 --stats stats.json --trace input.bin output.asv4
 ```
 
-### Reproduce Benchmarks
+### Reproduce All 16 Benchmarks (4.95 GiB)
 ```bash
-# Build exact in-process libzstd C API baseline harness
-clang++ -O3 -std=c++20 -I/opt/anaconda3/include -L/opt/anaconda3/lib -Wl,-rpath,/opt/anaconda3/lib \
-  v3/cpp/zstd_capi_bench.cpp -lzstd -o v3/cpp/zstd_capi_bench
+# 1. Build ./asv4, v3/cpp/asv3, and the exact in-process libzstd C API baseline harness
+make bench
 
-# Generate synthetic/local 10-file corpus (requires enwik9 download inside build_corpus.py)
+# 2. Generate the 10-file baseline corpus in v3/corpus/ (downloads enwik9)
 python3 v3/build_corpus.py
 
-# Run full 16-dataset same-binary L3 & L19 benchmark
+# 3. Download & assemble the 6 real public dumps in v3/corpus_real/
+#    (GPT-2 FP32, SmolLM2-135M BF16, NASA Hubble FITS, NYC TLC Taxi Struct/Arrow, Mixed Public)
+python3 v3/download_real_corpus.py
+
+# 4. Run the full 16-dataset same-binary L3 & L19 wall-clock / Peak RSS benchmark
 python3 v3/bench_final_refresh.py
 ```
 
@@ -112,10 +112,13 @@ python3 v3/bench_final_refresh.py
 
 | Path | Description |
 |---|---|
+| [`Makefile`](Makefile) | Auto-detecting C++20 build (`make` → `./asv4`, `make bench`, `make test`) |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | System architecture & Mermaid diagrams (pipeline, DP selector, `T2_NIBROT`, wire format, decoder handshake) |
 | [`v3/cpp/asv3.cpp`](v3/cpp/asv3.cpp) | **Production C++20 NEON ASV4 v4.1 streaming encoder & hardened decoder** |
 | [`v3/cpp/asv3_v3.0.cpp`](v3/cpp/asv3_v3.0.cpp) | Frozen `v3.0` C++20 NEON reference snapshot |
 | [`v3/cpp/zstd_capi_bench.cpp`](v3/cpp/zstd_capi_bench.cpp) | Exact in-process single-threaded `libzstd` C API baseline harness (`B2_capi` / `B3a_capi`) |
+| [`v3/download_real_corpus.py`](v3/download_real_corpus.py) | Downloads & builds all 6 real public benchmark datasets in `v3/corpus_real/` |
+| [`v3/build_corpus.py`](v3/build_corpus.py) | Builds the original 10-file pre-registered corpus in `v3/corpus/` |
 | [`v3/REPORT_V4.md`](v3/REPORT_V4.md) | Complete **ASV4 v4.1** technical report (16 datasets, OpenZL/Blosc2/ZipNN comparisons, theoretical analysis) |
 | [`v3/REPORT_V3.md`](v3/REPORT_V3.md) | Staged Phase 0 → 1A → 1B → 2 build report & Kill Gate 1B falsification record |
 | [`v3/AUDIT_V3.md`](v3/AUDIT_V3.md) | Forensic audit artifacts (corpus provenance, C-API baselines, divergence traces, OpenZL chunk-32 fix) |

@@ -14,11 +14,11 @@ flowchart TD
     FG --> S12["Coupled Stage 1 & 2: Online Probing, Viterbi DP & Verification"]
 
     S12 --> REG{"Verified Region Transform"}
-    REG -->|"T0 (Identity / Fallback)"| RAW_EMIT["Emit 4 MB Raw Blocks -> raw_grp + Index Gear Anchors"]
-    REG -->|"T1 / T2_XOR / T2_ELEM / T2_BIT / T2_NIBROT"| XF_EMIT["Region-Anchored 4 MB Blocks -> Forward NEON Kernel -> xform_grp"]
+    REG -->|"T0 (Identity / Fallback)"| RAW_EMIT["Emit 4 MB Raw Blocks → raw_grp + Index Gear Anchors"]
+    REG -->|"T1 / T2_XOR / T2_ELEM / T2_BIT / T2_NIBROT"| XF_EMIT["Region-Anchored 4 MB Blocks → Forward NEON Kernel → xform_grp"]
 
-    RAW_EMIT --> META_Q["Append 24 B MetaRecord(s) -> meta_raw"]
-    XF_EMIT --> CARRY["Tail (< unit_stride): Carry Across Group or Emit to raw_grp at Region End"]
+    RAW_EMIT --> META_Q["Append 24 B MetaRecord(s) → meta_raw"]
+    XF_EMIT --> CARRY["Tail (lt unit_stride): Carry Across Group or Emit to raw_grp at Region End"]
     XF_EMIT --> META_Q
     CARRY --> META_Q
 
@@ -45,22 +45,22 @@ Segmentation and transform selection are tightly coupled inside `segment_buffer_
 flowchart LR
     BUF["16 MB Flush Group (256 x 64 KB Slots)"] --> FC{"Stationary Fast-Confirm?"}
 
-    FC -->|"Non-T0: consec>=2, D_JS<0.12, i%8!=0"| FAST2["Fast-Confirm: Score {T0, active} (0.50x work)"]
-    FC -->|"T0: consec>=3, D_JS<0.04, i%4!=0"| FAST1["Fast-Confirm: Score {T0} only (0.25x work)"]
+    FC -->|"Non-T0: consec ≥ 2, D_JS lt 0.12, i mod 8 ≠ 0"| FAST2["Fast-Confirm: Score {T0, active} (0.50x work)"]
+    FC -->|"T0: consec ≥ 3, D_JS lt 0.04, i mod 4 ≠ 0"| FAST1["Fast-Confirm: Score {T0} only (0.25x work)"]
     FC -->|"Full Sweep / D_JS Spike / Mismatch"| FULL["Full Two-Tier Probe (16 KB Base + 64 KB Wide)"]
 
     FAST2 -->|"Active Still Wins"| DP["1D Viterbi DP (p_switch=48 KB, JS-Modulated)"]
     FAST2 -->|"Regime Changed"| FULL
     FAST1 --> DP
 
-    subgraph Probe["Two-Tier Scorer (Per-Plane zstd -1 for w in [2..8])"]
-        FULL --> H0_OUT{"Incompressible? (H0>7.95 & z1>=99.5%)"}
+    subgraph Probe["Two-Tier Scorer (Per-Plane zstd -1 for w in 2..8)"]
+        FULL --> H0_OUT{"Incompressible? (H0 gt 7.95 & z1 ≥ 99.5%)"}
         H0_OUT -->|"Yes"| T0_FAST["Return T0 Immediately"]
-        H0_OUT -->|"No"| LAG["NEON Exact-Match Autocorrelation M(L) -> Peaks (L1, L2)"]
+        H0_OUT -->|"No"| LAG["NEON Exact-Match Autocorrelation M(L) → Peaks (L1, L2)"]
         LAG --> MM["Miller-Madow H0 Pre-Filter + Pin {2, 4, 8} + L1"]
         MM --> TIER1["Tier 1: T1(w) Per-Plane zstd -1 + 2% Harmonic Tie-Break"]
-        TIER1 --> T2_GATE{"Best T1 <= 0.98 * T0?"}
-        T2_GATE -->|"No"| PICK["Select Best (Gain Gate <= 0.96 * T0)"]
+        TIER1 --> T2_GATE{"Best T1 ≤ 0.98 * T0?"}
+        T2_GATE -->|"No"| PICK["Select Best (Gain Gate ≤ 0.96 * T0)"]
         T2_GATE -->|"Yes"| TIER2["Tier 2 on Top-2 Widths: T2_XOR, T2_ELEM, T2_NIBROT (w=2,4,8), T2_BIT (w=4,8)"]
         TIER2 --> PICK
     end
@@ -71,9 +71,9 @@ flowchart LR
     DP --> GATES["Region Verification Gates"]
 
     subgraph Safety["Three-Layer Anti-Regression Guard"]
-        GATES --> LDM["Gear Rolling-Hash LDM Guard vs S_RAW History (reject if overlap >= 15%)"]
-        LDM --> Z3["2 x 256 KB Per-Plane zstd -3 Check (combined <= 0.94 & each <= z0 + 2048 B)"]
-        Z3 --> FLOOR["Net Savings Floor: >= 256 KB (or >= 128 KB warm-numeric if S_XFORM active)"]
+        GATES --> LDM["Gear Rolling-Hash LDM Guard vs S_RAW History (reject if overlap ≥ 15%)"]
+        LDM --> Z3["2 x 256 KB Per-Plane zstd -3 Check (combined ≤ 0.94 & each ≤ z0 + 2048 B)"]
+        Z3 --> FLOOR["Net Savings Floor: ≥ 256 KB (or ≥ 128 KB warm-numeric if S_XFORM active)"]
     end
 
     FLOOR -->|"Pass"| ACC["Accept Transformed Region"]
@@ -100,8 +100,8 @@ flowchart LR
     end
 
     subgraph NIB["Fused NEON T2_NIBROT(2, h=0)"]
-        R1["Plane 1 = (B1<<4)|(B0>>4): [E4..E0 | M6..M4] (H0 = 5.465 b)"]
-        R0["Plane 0 = (B0<<4)|(B1>>4): [M3..M0 | S, E7..E5] (H0 = 5.000 b)"]
+        R1["Plane 1 = (B1 shl 4) | (B0 shr 4): [E4..E0 | M6..M4] (H0 = 5.465 b)"]
+        R0["Plane 0 = (B0 shl 4) | (B1 shr 4): [M3..M0 | S, E7..E5] (H0 = 5.000 b)"]
     end
 
     B1 --> R1
@@ -177,10 +177,10 @@ sequenceDiagram
         Enc->>Enc: Segment (DP + Gates) & NEON Transform
         Note over Enc: Cap uninitialized streams to wlog=26 if dual-stream active
         Enc->>Pipe: Write GroupHeader (ld=0) + S_META + S_RAW + S_XFORM
-        Pipe->>Dec: Read GroupHeader (reject ld != 0 or payload > cap)
+        Pipe->>Dec: Read GroupHeader (reject ld ≠ 0 or payload gt cap)
         Dec->>Dec: LazyZstdDecoder decompress_append (linear 4 MB growth)
         loop For each 24 B MetaRecord
-            Dec->>Dec: Bounds check delta_op==0, w>=1, tail<=orig, r_pos/x_pos in range
+            Dec->>Dec: Bounds check delta_op == 0, w ≥ 1, tail ≤ orig, r_pos & x_pos in range
             Dec->>Dec: Inverse NEON Transform (if non-T0) + Update SHA-256
             Dec->>Dec: Write reconstructed bytes to stdout/file
         end
