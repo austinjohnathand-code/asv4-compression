@@ -11,6 +11,7 @@ __pycache__/
 # Compiled binaries
 asv4
 hnd2
+hnd3
 v3/cpp/asv3
 v3/cpp/zstd_capi_bench
 *.o

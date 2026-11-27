@@ -20,14 +20,17 @@ ZSTD_PREFIX := $(shell \
 CXXFLAGS := -O3 -std=c++20 $(ARCH_FLAGS) -Wall -Wextra -I$(ZSTD_PREFIX)/include
 LDFLAGS  := -L$(ZSTD_PREFIX)/lib -Wl,-rpath,$(ZSTD_PREFIX)/lib -lzstd
 
-.PHONY: all hnd2 bench test clean
+.PHONY: all hnd2 hnd3 bench test clean
 
-all: asv4 v3/cpp/asv3 hnd2
+all: asv4 v3/cpp/asv3 hnd2 hnd3
 
 asv4: v3/cpp/asv3.cpp
 	$(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
 hnd2: cpp/hnd2.cpp
+	$(CXX) -O3 -std=c++20 $(ARCH_FLAGS) -Wall -Wextra -pthread $< -o $@
+
+hnd3: cpp/hnd3.cpp
 	$(CXX) -O3 -std=c++20 $(ARCH_FLAGS) -Wall -Wextra -pthread $< -o $@
 
 v3/cpp/asv3: asv4
@@ -46,9 +49,11 @@ test:
 	rm -f /tmp/asv4_test
 	$(CXX) -O2 -std=c++20 -Wall -Wextra -fsanitize=undefined -fno-sanitize-recover=all -pthread \
 	  cpp/hnd2.cpp -o /tmp/hnd2_test
-	python3 -m unittest -v test_phase2.py
-	rm -f /tmp/hnd2_test
-	@echo "[PASS] UBSan + portable SHA-256 + HND2 Python/C++ cross-verification succeeded"
+	$(CXX) -O2 -std=c++20 -Wall -Wextra -fsanitize=undefined -fno-sanitize-recover=all -pthread \
+	  cpp/hnd3.cpp -o /tmp/hnd3_test
+	python3 -m unittest -v test_phase2.py test_phase3.py
+	rm -f /tmp/hnd2_test /tmp/hnd3_test
+	@echo "[PASS] UBSan + portable SHA-256 + HND2/HND3 Python/C++ cross-verification succeeded"
 
 clean:
-	rm -f asv4 hnd2 v3/cpp/asv3 v3/cpp/zstd_capi_bench /tmp/asv4_test /tmp/hnd2_test
+	rm -f asv4 hnd2 hnd3 v3/cpp/asv3 v3/cpp/zstd_capi_bench /tmp/asv4_test /tmp/hnd2_test /tmp/hnd3_test
