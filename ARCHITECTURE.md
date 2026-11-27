@@ -10,7 +10,7 @@ Input is processed in `16 MB` flush groups (`flush_group_bytes`) with zero backw
 
 ```mermaid
 flowchart TD
-    IN["Input Byte Stream (stdin / file)"] --> FG["Read 16 MB Flush Group + Update Streaming SHA-256"]
+    IN["Input Byte Stream (stdin / file)"] --> FG["Read 16 MiB Flush Group + Update Streaming SHA-256"]
     FG --> S12["Coupled Stage 1 & 2: Online Probing, Viterbi DP & Verification"]
 
     S12 --> REG{"Verified Region Transform"}
@@ -43,7 +43,7 @@ Segmentation and transform selection are tightly coupled inside `segment_buffer_
 
 ```mermaid
 flowchart LR
-    BUF["16 MB Flush Group (256 x 64 KB Slots)"] --> FC{"Stationary Fast-Confirm?"}
+    BUF["16 MiB Flush Group (256 x 64 KiB Slots)"] --> FC{"Stationary Fast-Confirm?"}
 
     FC -->|"Non-T0: consec ≥ 2, D_JS lt 0.12, i mod 8 ≠ 0"| FAST2["Fast-Confirm: Score {T0, active} (0.50x work)"]
     FC -->|"T0: consec ≥ 3, D_JS lt 0.04, i mod 4 ≠ 0"| FAST1["Fast-Confirm: Score {T0} only (0.25x work)"]
@@ -173,7 +173,7 @@ sequenceDiagram
     Enc->>Pipe: Write FileHeader (8 B: ASV3, ver=4, wlog=27)
     Pipe->>Dec: Read & validate magic, version in {3,4}, wlog in [10,27]
 
-    loop Every 16 MB Flush Group
+    loop Every 16 MiB Flush Group
         Enc->>Enc: Segment (DP + Gates) & NEON Transform
         Note over Enc: Cap uninitialized streams to wlog=26 if dual-stream active
         Enc->>Pipe: Write GroupHeader (ld=0) + S_META + S_RAW + S_XFORM
