@@ -64,6 +64,37 @@ See **[`ARCHITECTURE.md`](ARCHITECTURE.md)** for full Mermaid diagrams of the tw
 
 ---
 
+## HND3 — Reversible N-D Hyperspectral & Scientific Tensor Engine (`phase3-v3.0`)
+
+In addition to ASV4's 1D/record streaming engine, this repository includes **HND3** ([`cpp/hnd3.cpp`](cpp/hnd3.cpp) → `./hnd3`, wire-compatible with [`phase3_codec.py`](phase3_codec.py)), a **zero-dependency C++20 ARM64 NEON** reversible 3D/N-D tensor codec featuring complete-pivoted `LDU`-RKLT (`vmlal_s32` FMA), arbitrary-shape 2D 5/3 integer lifting, **16-stripe parallel 3D-context 32-bit rANS**, **single-stream 7-layer quality-embedded lossless coding**, built-in FIPS 180-4 SHA-256, and **native C++20 blind stride-lattice recovery (`--blind`)**.
+
+### Real Public Hyperspectral Cubes (Full Native Uncropped Dimensions, All `SHA-256 PASS`)
+
+| Native Real Cube | Std CCSDS-123 Blue Book (`Rice`) | **`.hnd3` One-Shot (`k=0`)** | **`.hnd3` 7-Layer Embedded (`k=6`)** | Base Layer `k=6` Preview (Same File!) | Pure C++ `--blind` (BSQ/BIL/BIP) |
+|---|---:|---:|---:|---:|---:|
+| **Indian Pines** `(200, 145, 145)`, `8.41 MB` | `6.734 b/s` (`2.38×`) | `6.485 b/s` (`196.8 MB/s` dec) | **`6.561 b/s` (`2.44×`)** (`120.7 MB/s` dec) | `1.09 b/s` → **`54.07 dB`** (`564.9 MB/s`) | `3/3` exact (`6.485 b/s`) |
+| **Salinas** `(204, 512, 217)`, `45.33 MB` | `5.094 b/s` (`3.14×`) | `4.657–4.691 b/s` (`220.4 MB/s` dec) | **`4.628 b/s` (`3.46×`, `+9.1%` vs CCSDS)** | `0.18 b/s` (`91×`) → **`60.11 dB`** (`347.8 MB/s`) | `3/3` exact (`5.988 b/s`* ) |
+| **PaviaU** `(103, 610, 340)`, `42.72 MB` | `6.839 b/s` (`2.34×`) | `6.367–6.547 b/s` (`207.5 MB/s` dec) | **`6.354 b/s` (`2.52×`, `+7.1%` vs CCSDS)** | `0.88 b/s` (`18×`) → **`52.89 dB`** (`483.6 MB/s`) | `3/3` true `B` (`6.550 b/s`* ) |
+
+*\*Blind C++20 BSQ/BIL/BIP timing test run on `(64, 256, 216)` subcubes for Salinas/PaviaU and full native `(200, 145, 145)` for Indian Pines; incompressible noise falls back cleanly to `[1]` raw framing (`< +0.2%` tax).*
+
+```bash
+# Build all C++20 binaries (./asv4, ./hnd2, ./hnd3) and run UBSan + cross-language verification
+make
+make test
+
+# Encode & decode a 3D hyperspectral cube (7-layer quality-embedded lossless .hnd3)
+./hnd3 enc cube.raw cube.hnd3 --shape 204,512,217 --dtype i16 --base-k 6
+./hnd3 dec cube.hnd3 cube_lossless.raw              # Full bit-exact decode + SHA-256 check
+./hnd3 dec cube.hnd3 preview.raw --stop-layer 6     # Instant 60 dB base preview (~348 MB/s)
+
+# Pure C++20 blind mode (zero shape hints, automatic BSQ/BIL/BIP stride & spectral-axis discovery)
+./hnd3 enc headerless.raw blind.hnd3 --blind --dtype u16 --base-k 0
+./hnd3 dec blind.hnd3 restored.raw
+```
+
+---
+
 ## Quickstart
 
 ### Build (macOS Apple Silicon or Linux x86-64/ARM64)
@@ -112,8 +143,14 @@ python3 v3/bench_final_refresh.py
 
 | Path | Description |
 |---|---|
-| [`Makefile`](Makefile) | Auto-detecting C++20 build (`make` → `./asv4`, `make bench`, `make test`) |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | System architecture & Mermaid diagrams (pipeline, DP selector, `T2_NIBROT`, wire format, decoder handshake) |
+| [`Makefile`](Makefile) | Auto-detecting C++20 build (`make` → `./asv4`, `./hnd2`, `./hnd3`; `make bench`; `make test`) |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | System architecture & Mermaid diagrams for both ASV4 v4.1 and HND3 (Phases 0–3) |
+| [`cpp/hnd3.cpp`](cpp/hnd3.cpp) | **Phase 3 zero-dependency C++20 NEON HND3 engine** (16-stripe rANS, `vmlal_s32` LDU, native `--blind`) |
+| [`cpp/hnd2.cpp`](cpp/hnd2.cpp) | Phase 2 C++20 NEON HND2 engine (7-layer quality-embedded lossless) |
+| [`phase3_codec.py`](phase3_codec.py), [`phase2_codec.py`](phase2_codec.py), [`phase1_codec.py`](phase1_codec.py) | Wire-compatible Python+Numba reference codecs for Phases 1–3 |
+| [`phase0_harness.py`](phase0_harness.py) | Phase 0 falsification harness v2.2 (Blue Book CCSDS-123, real Rice, Gates 0A–0D, Track B) |
+| [`test_phase0.py`](test_phase0.py), [`test_phase1.py`](test_phase1.py), [`test_phase2.py`](test_phase2.py), [`test_phase3.py`](test_phase3.py) | Automated verification suites (transforms, CCSDS-123, blind strides, Py↔C++ cross-interop) |
+| [`PHASE0_REPORT.md`](PHASE0_REPORT.md), [`PHASE1_REPORT.md`](PHASE1_REPORT.md), [`PHASE2_REPORT.md`](PHASE2_REPORT.md), [`PHASE3_REPORT.md`](PHASE3_REPORT.md) | Staged empirical falsification & real-cube benchmark reports (Phases 0–3) |
 | [`v3/cpp/asv3.cpp`](v3/cpp/asv3.cpp) | **Production C++20 NEON ASV4 v4.1 streaming encoder & hardened decoder** |
 | [`v3/cpp/asv3_v3.0.cpp`](v3/cpp/asv3_v3.0.cpp) | Frozen `v3.0` C++20 NEON reference snapshot |
 | [`v3/cpp/zstd_capi_bench.cpp`](v3/cpp/zstd_capi_bench.cpp) | Exact in-process single-threaded `libzstd` C API baseline harness (`B2_capi` / `B3a_capi`) |

@@ -194,13 +194,95 @@ sequenceDiagram
 
 ---
 
-## 6. Evolutionary History (Falsification Record)
+## 6. HND3: Reversible N-D Hyperspectral & Scientific Tensor Architecture (Phases 0–3)
 
-| Version | Milestone | Outcome |
+Alongside ASV4's 1D/record streaming engine, **HND3 (`phase3-v3.0`, [`cpp/hnd3.cpp`](cpp/hnd3.cpp))** is a zero-dependency C++20 ARM64 NEON reversible 3D/N-D tensor codec (wire-compatible with [`phase3_codec.py`](phase3_codec.py)) developed through staged empirical falsification across three full native-resolution public hyperspectral cubes (`Indian Pines`, `Salinas`, `Pavia University`).
+
+### 6.1 End-to-End HND3 Pipeline (Explicit & Native C++20 Blind Track A)
+
+```mermaid
+flowchart TD
+    IN["Input Raw Tensor or Headerless 1D Stream (i16 / u16 / i32)"] --> MODE{"Mode?"}
+
+    MODE -->|"--blind (Zero Shape Hints)"| FFT["Iterative Radix-2 FFT Centered Pearson ACF + Axis-Peeling"]
+    FFT --> STR{"Valid 3D Lattice Strides [1, s1, s2]?"}
+    STR -->|"No (e.g. Noise)"| RAWF["FLAG_RAW Fallback (62 B Header + Raw Bytes + SHA-256)"]
+    STR -->|"Yes"| ROLE["Fast Center-Crop Multi-Level LDU + 2D 5/3 Role Picker → spec_axis"]
+    ROLE --> PERM["Move spec_axis to Axis 0: (B, H, W)"]
+    MODE -->|"Explicit --shape D0,D1,D2"| PERM
+
+    PERM --> LDU["Complete-Pivoted LDU-RKLT (Q15 int16 L/U + NEON vmlal_s32 FMA)"]
+    LDU --> DWT["Multi-Threaded Arbitrary-Shape 2D 5/3 Integer Lifting (L=3)"]
+    DWT --> SUBS["Coarse-to-Fine Subband Schedule: LL → L3 → L2 → L1"]
+
+    SUBS --> BASE["Base Layer (k = base_k): 16-Stripe Parallel 3D-Context 32-bit rANS + 64-bit Extra-Bits"]
+    BASE --> REF{"base_k gt 0?"}
+    REF -->|"No (k=0 One-Shot)"| OUT["62 B HND3 Header + SHA-256 + LDU Stages + Framed Stripes"]
+    REF -->|"Yes (k=6 Embedded)"| LAY["Refinement Layers k = 5..0: 16-Stripe 360-deg Context Significance + Magnitude rANS"]
+    LAY --> OUT
+```
+
+### 6.2 Complete-Pivoted `LDU`-RKLT & 16-Stripe 7-Layer Embedded Layout
+
+Complete-pivoted LU ($P\,\mathrm{diag}(s_0)\,U_{\text{KLT}}\,Q = L\,\mathrm{diag}(s_d)\,D_{\text{ladder}}\,U$) bounds all off-diagonal triangular entries to $|L_{ij}|, |U_{ij}| \le 1$ (stored losslessly in Q15 `int16`) and factors $D$ via a greedy log-balanced Daubechies-Sweldens 3-rounding diagonal ladder (`0` Givens fallbacks up to full `204×204`). Partitioning each subband into `n_stripes = min(B, 16)` independent band stripes unlocks all CPU cores while letting each energy tier (`PC1..PC12` vs. noise floor `PC190..PC204`) train its own compact 12-bit rANS frequency table.
+
+```mermaid
+flowchart LR
+    subgraph Header["HND3 Header & Spectral Model"]
+        H["FileHeader (62 B): magic='HND3', ver=3, base_k, n_stripes, shape, SHA-256"]
+        SP["LDU Stages: uint16 perms + bit-packed signs + Q15 int16 strict L/U + int32 ladder"]
+        H --> SP
+    end
+
+    subgraph Base["Base Layer (k = base_k, e.g. q ~ 64, 15x-91x Preview)"]
+        B0["Subband LL: Stripes 0..S-1 (16-ctx x 32-sym 12-bit rANS + 64-bit EB)"]
+        B1["Subbands L3, L2, L1: Stripes 0..S-1 (Spatial + Parent + Cross-Band EMA Context)"]
+        B0 --> B1
+    end
+
+    subgraph Refine["Refinement Layers (k = 5 down to 0, L2-Aligned Offsets [2,2,2,1,1,1,0,0,0,0])"]
+        R5["Layer k=5 (q ~ 32) → k=4 (16) → k=3 (8) → k=2 (4) → k=1 (2)"]
+        R0["Layer k=0 (p = 0): Bit-Exact Lossless Reconstruction + Built-In SHA-256 Verify"]
+        R5 --> R0
+    end
+
+    Header --> Base --> Refine
+```
+
+### 6.3 Native C++20 Blind Track A Stride-Lattice Discovery (`recover_strides_cpp`)
+
+```mermaid
+flowchart TD
+    X["Flat 1D Signal x (Zero Shape / Divisor Hints)"] --> CEN["Global Mean-Centering + Variance Floor Guard (const → [1])"]
+    CEN --> ACF0["Radix-2 FFT Exact Pearson ACF rho_raw[0..N/4]"]
+    ACF0 --> LOOP["Current Stride s_prev (init = 1)"]
+
+    LOOP --> P1["Cumulative Peel cur_peeled = cur[s:] - cur[:-s] → rho_peel"]
+    LOOP --> P2["Direct xpeel = x[s:] - x[:-s] (if var ratio gt 0.002) → rho_xpeel"]
+    P1 --> PK["Rectified Peak Finding (min_prom=0.10, min_val=0.20)"]
+    P2 --> PK
+
+    PK --> GRD["Guards: k=2 MA(1) Rebound + Non-Periodic 2*k Harmonic Check"]
+    GRD --> YIN["Rectified YIN Fundamental Selection"]
+    YIN --> DIV["Harmonic-Verified Divisor Refinement (2*d or 3*d for half-period)"]
+    DIV --> NEXT["Append s_next = best_k * s_prev; Update cur if var drops"]
+    NEXT -->|"len lt max_axes and peaks remain"| LOOP
+    NEXT -->|"Done"| OUT["Recovered Stride Chain [1, s1, s2, ...]"]
+```
+
+---
+
+## 7. Evolutionary History (Falsification Record)
+
+| Version / Tag | Milestone | Outcome |
 |---|---|---|
 | **v1 (`ftcc/`)** | Energy clumping + forest of trees Python/Numba prototype | Superseded by v3 strict streaming/worst-case spec |
 | **v3 Phase 0 & 1A** | Coupled Stage 1 & 2 (`codec.py`) + `ASV3` container | **PASS** — 100% SHA-256, pipe-safe, `≤ +0.002%` worst-case tax |
 | **v3 Phase 1B** | Stage 3 bounded delta forest (`stage3_forest.py`) | **CUT PERMANENTLY** — regressed `+11.80%` on snapshots, `+3.03%` on binaries |
 | **v3.0 (`asv3_v3.0.cpp`)** | C++20 NEON port, UBSan bounds checks, fast-confirm, tiled `T2_BIT`, portable SHA-256 | **RELEASED** — `−7.05%` GPT-2, `−15.45%` Hubble FITS, `≤ +0.0028%` tax, `0.83×` Work Mult |
 | **v4.0** | `T2_NIBROT` (`w=4,8`) NEON, per-plane `zstd -1/-3` scoring, combined-gain gate | Surpassed OpenZL `le32` on GPT-2 (`394.91 MB`, `1,285 MB/s` dec), `−16.86%` Hubble FITS |
-| **v4.1 (`asv3.cpp`)** | `T2_NIBROT(2)` NEON for BF16, monotonic L19 cap, `T3_2D` encoder retirement | **CURRENT** — Beats OpenZL, Blosc2 & ZipNN on both GPT-2 FP32 (`394.91 MB`) and SmolLM2 BF16 (`170.44 MB`), `16/16` monotonic `L19 ≤ L3`, `0.89×` Work Mult |
+| **`v4.1` (`asv3.cpp`)** | `T2_NIBROT(2)` NEON for BF16, monotonic L19 cap, `T3_2D` encoder retirement | **RELEASED** — Beats OpenZL, Blosc2 & ZipNN on GPT-2 FP32 (`394.91 MB`) & SmolLM2 BF16 (`170.44 MB`), `16/16` monotonic `L19 ≤ L3`, `0.89×` Work Mult |
+| **`phase0-v2.2`** | Hyperspectral N-D falsification harness, exact Blue Book CCSDS-123 (`P=3/15`), real Rice coder, 14-test suite | **PASS** — Killed folded spatial KLT (`0A`), passed `R6` (`0B`), passed 48/48 blind stride recovery (`0D`) |
+| **`phase1-v1.0`** | Gate 1A (`R6` = 91–97% variance heteroscedasticity), complete-pivoted `LDU`-RKLT, 3D-context 32-bit rANS, $L_2$-weighted Track B (`.hnd1`) | **PASS** — Beats Blue Book CCSDS-123 on real cubes (`6.427 / 4.714 / 6.441 b/s`), `99.4×` @ `59.8 dB` on Salinas |
+| **`phase2-v2.0`** | Unified 7-layer quality-embedded `.hnd2` + zero-dependency C++20 NEON engine (`./hnd2`) | **PASS** — `53–60 dB` base preview from single lossless file, `92–135 MB/s` dec, UBSan + Py↔C++ verified |
+| **`phase3-v3.0`** | 16-stripe parallel rANS + true NEON `vmlal_s32` FMA + 64-bit EB + native C++20 `--blind` FFT (`./hnd3`) | **CURRENT** — 7-layer embedded beats one-shot & float KLT (`4.628 b/s` Salinas `+9.1%` vs CCSDS-123, `6.354 b/s` PaviaU `+7.1%`), up to `220 MB/s` lossless / `565 MB/s` preview dec, UBSan + Py↔C++ verified |
