@@ -761,17 +761,25 @@ static inline void val_to_tok_eb(int64_t v, uint8_t& tok, uint8_t& eb, uint64_t&
     uint64_t u = (v >= 0) ? (static_cast<uint64_t>(v) << 1)
                           : ((static_cast<uint64_t>(-v) << 1) - 1ULL);
     if (u < 4ULL) { tok = static_cast<uint8_t>(u); eb = 0; rem = 0; return; }
-    if (u >= (1ULL << 15)) { tok = 31; eb = 32; rem = u; return; }
+    if (u < (1ULL << 15)) {
+        int m = 63 - __builtin_clzll(u);
+        int b = static_cast<int>((u >> (m - 1)) & 1ULL);
+        tok = static_cast<uint8_t>(2 * m + b);
+        eb = static_cast<uint8_t>(m - 1);
+        rem = u & ((1ULL << eb) - 1ULL);
+        return;
+    }
+    if (u < (1ULL << 16)) {
+        tok = 30; eb = 15; rem = u & ((1ULL << 15) - 1ULL); return;
+    }
     int m = 63 - __builtin_clzll(u);
-    int b = static_cast<int>((u >> (m - 1)) & 1ULL);
-    tok = static_cast<uint8_t>(2 * m + b);
-    eb = static_cast<uint8_t>(m - 1);
-    rem = u & ((1ULL << eb) - 1ULL);
+    tok = 31; eb = static_cast<uint8_t>(m); rem = u & ((1ULL << m) - 1ULL);
 }
 
 static inline int64_t tok_eb_to_val(uint8_t tok, uint64_t rem) {
     uint64_t u;
     if (tok < 4) u = tok;
+    else if (tok == 30) u = (1ULL << 15) | rem;
     else if (tok == 31) u = rem;
     else {
         int m = tok >> 1;
@@ -961,18 +969,22 @@ static std::vector<uint8_t> pack_rans_subband(const int64_t* blk, int B, int H, 
     words.push_back(static_cast<uint16_t>((state >> 16) & 0xFFFFu));
 
     size_t tot_eb = 0;
-    for (size_t i = 0; i < N; ++i) tot_eb += ebs[i];
+    for (size_t i = 0; i < N; ++i) tot_eb += (toks[i] == 31) ? (6u + ebs[i]) : ebs[i];
     std::vector<uint8_t> eb_bytes;
     eb_bytes.reserve((tot_eb + 7) / 8 + 1);
     uint8_t cur_b = 0; int nb = 0;
+    auto push_bits = [&](uint64_t val, int nbits) {
+        for (int k = nbits - 1; k >= 0; --k) {
+            cur_b = static_cast<uint8_t>((cur_b << 1) | ((val >> k) & 1ULL));
+            if (++nb == 8) { eb_bytes.push_back(cur_b); cur_b = 0; nb = 0; }
+        }
+    };
     for (size_t i = 0; i < N; ++i) {
-        int eb = ebs[i];
-        if (eb > 0) {
-            uint64_t val = rems[i];
-            for (int k = eb - 1; k >= 0; --k) {
-                cur_b = static_cast<uint8_t>((cur_b << 1) | ((val >> k) & 1ULL));
-                if (++nb == 8) { eb_bytes.push_back(cur_b); cur_b = 0; nb = 0; }
-            }
+        if (toks[i] == 31) {
+            push_bits(static_cast<uint64_t>(ebs[i] - 16), 6);
+            push_bits(rems[i], ebs[i]);
+        } else if (ebs[i] > 0) {
+            push_bits(rems[i], ebs[i]);
         }
     }
     if (nb > 0) eb_bytes.push_back(static_cast<uint8_t>(cur_b << (8 - nb)));
@@ -1059,11 +1071,22 @@ static void unpack_rans_subband(const uint8_t* p, size_t payload_pos, size_t pay
                 }
                 uint64_t rem = 0;
                 if (s >= 4) {
-                    int eb = (s == 31) ? 32 : ((s >> 1) - 1);
-                    for (int k = 0; k < eb; ++k) {
-                        uint64_t bit = (eb_ptr[bpos] >> (7 - bit_i)) & 1U;
-                        rem = (rem << 1) | bit;
-                        if (++bit_i == 8) { bit_i = 0; bpos++; }
+                    auto pull_bits = [&](int nbits) -> uint64_t {
+                        uint64_t v = 0;
+                        for (int k = 0; k < nbits; ++k) {
+                            uint64_t bit = (eb_ptr[bpos] >> (7 - bit_i)) & 1U;
+                            v = (v << 1) | bit;
+                            if (++bit_i == 8) { bit_i = 0; bpos++; }
+                        }
+                        return v;
+                    };
+                    if (s == 30) rem = pull_bits(15);
+                    else if (s == 31) {
+                        uint64_t w = pull_bits(6);
+                        int m = 16 + static_cast<int>(w);
+                        rem = (1ULL << m) | pull_bits(m);
+                    } else {
+                        rem = pull_bits((s >> 1) - 1);
                     }
                 }
                 int64_t v = tok_eb_to_val(s, rem);

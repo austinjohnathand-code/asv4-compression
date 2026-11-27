@@ -369,35 +369,47 @@ def spectral_ldu_inverse(Y_cube, spec_code, mv, pos):
 # =============================================================================
 @njit(cache=True)
 def _val_to_tok_eb(v):
-    u = (v << 1) if v >= 0 else ((-v) << 1) - 1
-    if u < 4:
-        return u, 0, 0
-    if u >= (1 << 15):
-        return 31, 32, u
+    u = np.uint64(v << 1) if v >= 0 else np.uint64(((-v) << 1) - 1)
+    if u < np.uint64(4):
+        return np.int64(u), np.int64(0), np.uint64(0)
+    if u < (np.uint64(1) << np.uint64(15)):
+        m = 0
+        tmp = u
+        while tmp > np.uint64(1):
+            tmp >>= np.uint64(1)
+            m += 1
+        b = int((u >> np.uint64(m - 1)) & np.uint64(1))
+        tok = 2 * m + b
+        eb = m - 1
+        rem = u & ((np.uint64(1) << np.uint64(eb)) - np.uint64(1))
+        return np.int64(tok), np.int64(eb), rem
+    if u < (np.uint64(1) << np.uint64(16)):
+        return np.int64(30), np.int64(15), u & ((np.uint64(1) << np.uint64(15)) - np.uint64(1))
     m = 0
     tmp = u
-    while tmp > 1:
-        tmp >>= 1
+    while tmp > np.uint64(1):
+        tmp >>= np.uint64(1)
         m += 1
-    b = (u >> (m - 1)) & 1
-    tok = 2 * m + b
-    eb = m - 1
-    rem = u & ((1 << eb) - 1)
-    return tok, eb, rem
+    rem = u & ((np.uint64(1) << np.uint64(m)) - np.uint64(1))
+    return np.int64(31), np.int64(m), rem
 
 
 @njit(cache=True)
 def _tok_eb_to_val(tok, rem):
     if tok < 4:
-        u = tok
+        u = np.uint64(tok)
+    elif tok == 30:
+        u = (np.uint64(1) << np.uint64(15)) | np.uint64(rem)
     elif tok == 31:
-        u = rem
+        u = np.uint64(rem)
     else:
         m = tok >> 1
         b = tok & 1
         eb = m - 1
-        u = ((2 + b) << eb) | rem
-    return (u >> 1) if (u & 1) == 0 else -((u + 1) >> 1)
+        u = (np.uint64(2 + b) << np.uint64(eb)) | np.uint64(rem)
+    if (u & np.uint64(1)) == np.uint64(0):
+        return np.int64(u >> np.uint64(1))
+    return -np.int64((u + np.uint64(1)) >> np.uint64(1))
 
 
 @njit(cache=True)
@@ -427,7 +439,7 @@ def _extract_3d_tokens(blk, parent, has_parent):
     toks = np.empty(N, dtype=np.uint8)
     ctxs = np.empty(N, dtype=np.uint8)
     ebs = np.empty(N, dtype=np.uint8)
-    rems = np.empty(N, dtype=np.int64)
+    rems = np.empty(N, dtype=np.uint64)
     counts = np.zeros((N_CTXS, N_SYMS), dtype=np.int64)
     pH = parent.shape[1] if has_parent else 0
     pW = parent.shape[2] if has_parent else 0
@@ -520,23 +532,43 @@ def _rans_encode_numba(toks, ctxs, ebs, rems, freqs, cdfs):
 
     tot_eb = 0
     for i in range(N):
-        tot_eb += ebs[i]
+        tot_eb += (6 + ebs[i]) if toks[i] == 31 else ebs[i]
     eb_bytes = np.zeros((tot_eb + 7) // 8 + 1, dtype=np.uint8)
     bpos = 0
     cur = 0
     nb = 0
     for i in range(N):
-        eb = ebs[i]
-        if eb > 0:
-            val = rems[i]
-            for k in range(eb - 1, -1, -1):
-                cur = (cur << 1) | ((val >> k) & 1)
+        if toks[i] == 31:
+            w = np.uint64(ebs[i] - 16)
+            for k in range(5, -1, -1):
+                cur = (cur << 1) | int((w >> np.uint64(k)) & np.uint64(1))
                 nb += 1
                 if nb == 8:
                     eb_bytes[bpos] = cur
                     bpos += 1
                     cur = 0
                     nb = 0
+            val = rems[i]
+            for k in range(int(ebs[i]) - 1, -1, -1):
+                cur = (cur << 1) | int((val >> np.uint64(k)) & np.uint64(1))
+                nb += 1
+                if nb == 8:
+                    eb_bytes[bpos] = cur
+                    bpos += 1
+                    cur = 0
+                    nb = 0
+        else:
+            eb = int(ebs[i])
+            if eb > 0:
+                val = rems[i]
+                for k in range(eb - 1, -1, -1):
+                    cur = (cur << 1) | int((val >> np.uint64(k)) & np.uint64(1))
+                    nb += 1
+                    if nb == 8:
+                        eb_bytes[bpos] = cur
+                        bpos += 1
+                        cur = 0
+                        nb = 0
     if nb > 0:
         eb_bytes[bpos] = cur << (8 - nb)
         bpos += 1
@@ -618,13 +650,41 @@ def _rans_decode_3d_numba(B, H, W, parent, has_parent, words, eb_bytes, freqs, c
                     wpos -= 1
 
                 if s < 4:
-                    rem = np.int64(0)
+                    rem = np.uint64(0)
+                elif s == 30:
+                    rem = np.uint64(0)
+                    for _ in range(15):
+                        bit = (int(eb_bytes[bpos]) >> (7 - bit_i)) & 1
+                        rem = (rem << np.uint64(1)) | np.uint64(bit)
+                        bit_i += 1
+                        if bit_i == 8:
+                            bit_i = 0
+                            bpos += 1
+                elif s == 31:
+                    w = 0
+                    for _ in range(6):
+                        bit = (int(eb_bytes[bpos]) >> (7 - bit_i)) & 1
+                        w = (w << 1) | bit
+                        bit_i += 1
+                        if bit_i == 8:
+                            bit_i = 0
+                            bpos += 1
+                    m = 16 + w
+                    r = np.uint64(0)
+                    for _ in range(m):
+                        bit = (int(eb_bytes[bpos]) >> (7 - bit_i)) & 1
+                        r = (r << np.uint64(1)) | np.uint64(bit)
+                        bit_i += 1
+                        if bit_i == 8:
+                            bit_i = 0
+                            bpos += 1
+                    rem = (np.uint64(1) << np.uint64(m)) | r
                 else:
-                    eb = 32 if s == 31 else ((s >> 1) - 1)
-                    rem = np.int64(0)
+                    eb = (s >> 1) - 1
+                    rem = np.uint64(0)
                     for _ in range(eb):
                         bit = (int(eb_bytes[bpos]) >> (7 - bit_i)) & 1
-                        rem = (rem << 1) | bit
+                        rem = (rem << np.uint64(1)) | np.uint64(bit)
                         bit_i += 1
                         if bit_i == 8:
                             bit_i = 0

@@ -1067,17 +1067,25 @@ static inline void val_to_tok_eb(int64_t v, uint8_t& tok, uint8_t& eb, uint64_t&
     uint64_t u = (v >= 0) ? (static_cast<uint64_t>(v) << 1)
                           : ((static_cast<uint64_t>(-v) << 1) - 1ULL);
     if (u < 4ULL) { tok = static_cast<uint8_t>(u); eb = 0; rem = 0; return; }
-    if (u >= (1ULL << 15)) { tok = 31; eb = 32; rem = u; return; }
+    if (u < (1ULL << 15)) {
+        int m = 63 - __builtin_clzll(u);
+        int b = static_cast<int>((u >> (m - 1)) & 1ULL);
+        tok = static_cast<uint8_t>(2 * m + b);
+        eb  = static_cast<uint8_t>(m - 1);
+        rem = u & ((1ULL << eb) - 1ULL);
+        return;
+    }
+    if (u < (1ULL << 16)) {
+        tok = 30; eb = 15; rem = u & ((1ULL << 15) - 1ULL); return;
+    }
     int m = 63 - __builtin_clzll(u);
-    int b = static_cast<int>((u >> (m - 1)) & 1ULL);
-    tok = static_cast<uint8_t>(2 * m + b);
-    eb = static_cast<uint8_t>(m - 1);
-    rem = u & ((1ULL << eb) - 1ULL);
+    tok = 31; eb = static_cast<uint8_t>(m); rem = u & ((1ULL << m) - 1ULL);
 }
 
 static inline int64_t tok_eb_to_val(uint8_t tok, uint64_t rem) {
     uint64_t u;
     if (tok < 4) u = tok;
+    else if (tok == 30) u = (1ULL << 15) | rem;
     else if (tok == 31) u = rem;
     else {
         int m = tok >> 1;
@@ -1212,6 +1220,7 @@ struct FastBitReader {
     }
     inline uint64_t read(int n) {
         if (bits < n) refill();
+        if (bits < n) throw std::runtime_error("Truncated extra-bit stream");
         uint64_t v = buf >> (64 - n);
         buf <<= n;
         bits -= n;
@@ -1315,7 +1324,18 @@ static std::vector<uint8_t> pack_rans_stripe(const int64_t* blk, int Bs, int H, 
     FastBitWriter bw;
     bw.out.reserve(N / 2 + 16);
     for (size_t i = 0; i < N; ++i) {
-        if (ebs[i] > 0) bw.write(rems[i], ebs[i]);
+        if (toks[i] == 31) {
+            int m = ebs[i];
+            bw.write(static_cast<uint64_t>(m - 16), 6);
+            if (m <= 32) {
+                bw.write(rems[i], m);
+            } else {
+                bw.write(rems[i] >> 32, m - 32);
+                bw.write(rems[i] & 0xFFFFFFFFULL, 32);
+            }
+        } else if (ebs[i] > 0) {
+            bw.write(rems[i], ebs[i]);
+        }
     }
     bw.flush();
 
@@ -1408,8 +1428,25 @@ static void unpack_rans_stripe(const uint8_t* p, size_t payload_pos, size_t payl
                 if (state < RANS_L) throw std::runtime_error("Truncated rANS bitstream");
                 uint64_t rem = 0;
                 if (s >= 4) {
-                    int eb = (s == 31) ? 32 : ((s >> 1) - 1);
-                    rem = br.read(eb);
+                    if (s == 30) {
+                        rem = br.read(15);
+                    } else if (s == 31) {
+                        uint64_t w = br.read(6);
+                        if (w > 46) throw std::runtime_error("Invalid escape bit width");
+                        int m = 16 + static_cast<int>(w);
+                        uint64_t r;
+                        if (m <= 32) {
+                            r = br.read(m);
+                        } else {
+                            uint64_t hi = br.read(m - 32);
+                            uint64_t lo = br.read(32);
+                            r = (hi << 32) | lo;
+                        }
+                        rem = (1ULL << m) | r;
+                    } else {
+                        int eb = (s >> 1) - 1;
+                        rem = br.read(eb);
+                    }
                 }
                 int64_t v = tok_eb_to_val(s, rem);
                 pl[y * W + x] = v;
@@ -1421,6 +1458,8 @@ static void unpack_rans_stripe(const uint8_t* p, size_t payload_pos, size_t payl
         }
         prev_ema = cur_ema;
     }
+    if (state != RANS_L || wpos != -1)
+        throw std::runtime_error("Corrupt base rANS final state");
 }
 
 static inline uint8_t sig_ctx(const int64_t* prev_sub, const int64_t* cur_sub,
@@ -1577,6 +1616,8 @@ static void unpack_refine_stripe(const uint8_t* p, size_t payload_pos, size_t pa
             }
         }
     }
+    if (state != RANS_L || wpos != -1)
+        throw std::runtime_error("Corrupt refine rANS final state");
 }
 
 static inline int64_t dequant_mid(int64_t v, int p) {
@@ -1634,74 +1675,95 @@ static void move_axis_from_front(const int64_t* src, int64_t* dst, uint32_t d0, 
     }
 }
 
-// Fast native C++20 spectral-axis role picker: runs 1-level clustered LDU + 2D 5/3 on a small
-// center spatial crop (<= 48x48) and measures mean log2(|coeff| + 1) -> picks true spectral axis in < 10 ms!
-static uint8_t choose_spectral_axis_cpp(const int64_t* orig, uint32_t d0, uint32_t d1, uint32_t d2, int n_threads) {
+// Fast native C++20 spectral-axis role picker: compares all 3 candidate spectral axes AND plain 2D 5/3
+// (SPEC_NONE, returns -1) on the EXACT SAME centered 3D subcube so voxel subsets are apples-to-apples!
+static int choose_spectral_axis_cpp(const int64_t* orig, uint32_t d0, uint32_t d1, uint32_t d2, int n_threads) {
     uint32_t dims[3] = {d0, d1, d2};
-    uint8_t best_ax = 0;
-    double best_score = 1e30;
-    for (int ax = 0; ax < 3; ++ax) {
-        int B = static_cast<int>(dims[ax]);
-        int H = static_cast<int>(dims[(ax == 0) ? 1 : 0]);
-        int W = static_cast<int>(dims[(ax == 2) ? 1 : 2]);
-        if (B < 2 || H < 4 || W < 4) continue;
-        int ch = std::min(H, 48) / 4 * 4;
-        int cw = std::min(W, 48) / 4 * 4;
-        int y0 = (H - ch) / 2, x0 = (W - cw) / 2;
-        size_t cHW = static_cast<size_t>(ch) * cw;
-        std::vector<int64_t> sub(static_cast<size_t>(B) * cHW);
-        // Extract center crop with axis `ax` at front
-        for (int b = 0; b < B; ++b) {
-            for (int y = 0; y < ch; ++y) {
-                for (int x = 0; x < cw; ++x) {
-                    uint32_t i0, i1, i2;
-                    if (ax == 0)      { i0 = b; i1 = y0 + y; i2 = x0 + x; }
-                    else if (ax == 1) { i0 = y0 + y; i1 = b; i2 = x0 + x; }
-                    else              { i0 = y0 + y; i1 = x0 + x; i2 = b; }
-                    sub[static_cast<size_t>(b) * cHW + y * cw + x] =
-                        orig[(static_cast<size_t>(i0) * d1 + i1) * d2 + i2];
-                }
+    uint32_t sd[3];
+    uint32_t o0[3];
+    for (int i = 0; i < 3; ++i) {
+        sd[i] = (dims[i] >= 8) ? (std::min<uint32_t>(dims[i], 48) / 4 * 4) : dims[i];
+        o0[i] = (dims[i] - sd[i]) / 2;
+    }
+
+    auto score_sub = [&](std::vector<int64_t>& sub, int B, int H, int W, bool do_ldu) -> double {
+        size_t cHW = static_cast<size_t>(H) * W;
+        if (do_ldu && B > 1) {
+            for (int b = 0; b < B; ++b) {
+                int64_t* row = sub.data() + static_cast<size_t>(b) * cHW;
+                double s = 0.0; for (size_t i = 0; i < cHW; ++i) s += static_cast<double>(row[i]);
+                int64_t m = std::llround(s / static_cast<double>(cHW));
+                for (size_t i = 0; i < cHW; ++i) row[i] -= m;
             }
-        }
-        // Mean-center + gs=8 LDU-RKLT + 2-level 2D 5/3
-        for (int b = 0; b < B; ++b) {
-            int64_t* row = sub.data() + static_cast<size_t>(b) * cHW;
-            double s = 0.0; for (size_t i = 0; i < cHW; ++i) s += static_cast<double>(row[i]);
-            int64_t m = std::llround(s / static_cast<double>(cHW));
-            for (size_t i = 0; i < cHW; ++i) row[i] -= m;
-        }
-        std::vector<uint16_t> heads;
-        for (int g = 0; g < B; g += 8) {
-            std::vector<uint16_t> grp;
-            for (int i = g; i < std::min(g + 8, B); ++i) grp.push_back(static_cast<uint16_t>(i));
-            if (grp.size() > 1) {
-                auto U = klt_u_jacobi(sub.data(), static_cast<int>(grp.size()), cHW, grp);
-                auto st = complete_pivoted_ldu(U, grp);
-                ldu_apply_stage(sub.data(), cHW, st, false, false, 1);
-            }
-            heads.push_back(grp[0]);
-        }
-        // Level-2+ head combining (matches clustered_serm so true spectral axis wins cleanly!)
-        while (heads.size() > 1) {
-            std::vector<uint16_t> nxt;
-            for (size_t g = 0; g < heads.size(); g += 8) {
-                std::vector<uint16_t> grp(heads.begin() + g, heads.begin() + std::min(g + 8, heads.size()));
+            std::vector<uint16_t> heads;
+            for (int g = 0; g < B; g += 8) {
+                std::vector<uint16_t> grp;
+                for (int i = g; i < std::min(g + 8, B); ++i) grp.push_back(static_cast<uint16_t>(i));
                 if (grp.size() > 1) {
                     auto U = klt_u_jacobi(sub.data(), static_cast<int>(grp.size()), cHW, grp);
                     auto st = complete_pivoted_ldu(U, grp);
                     ldu_apply_stage(sub.data(), cHW, st, false, false, 1);
                 }
-                nxt.push_back(grp[0]);
+                heads.push_back(grp[0]);
             }
-            heads = std::move(nxt);
+            while (heads.size() > 1) {
+                std::vector<uint16_t> nxt;
+                for (size_t g = 0; g < heads.size(); g += 8) {
+                    std::vector<uint16_t> grp(heads.begin() + g, heads.begin() + std::min(g + 8, heads.size()));
+                    if (grp.size() > 1) {
+                        auto U = klt_u_jacobi(sub.data(), static_cast<int>(grp.size()), cHW, grp);
+                        auto st = complete_pivoted_ldu(U, grp);
+                        ldu_apply_stage(sub.data(), cHW, st, false, false, 1);
+                    }
+                    nxt.push_back(grp[0]);
+                }
+                heads = std::move(nxt);
+            }
         }
-        auto pl = build_dwt_plan(ch, cw, 2);
-        dwt53_2d_cube(sub.data(), B, ch, cw, pl, false, std::min(n_threads, 4));
-        // Laplace entropy proxy: mean(log2(|v| + 1)) across all coefficients
+        auto pl = build_dwt_plan(H, W, 2);
+        dwt53_2d_cube(sub.data(), B, H, W, pl, false, std::min(n_threads, 4));
         double sc = 0.0;
         for (int64_t v : sub) sc += std::log2(static_cast<double>(std::abs(v)) + 1.0);
-        sc /= static_cast<double>(sub.size());
-        if (sc < best_score) { best_score = sc; best_ax = static_cast<uint8_t>(ax); }
+        return sc / static_cast<double>(sub.size());
+    };
+
+    auto extract_ax = [&](int ax) -> std::vector<int64_t> {
+        int B = static_cast<int>(sd[ax]);
+        int H = static_cast<int>(sd[(ax == 0) ? 1 : 0]);
+        int W = static_cast<int>(sd[(ax == 2) ? 1 : 2]);
+        size_t cHW = static_cast<size_t>(H) * W;
+        std::vector<int64_t> sub(static_cast<size_t>(B) * cHW);
+        for (int b = 0; b < B; ++b) {
+            for (int y = 0; y < H; ++y) {
+                for (int x = 0; x < W; ++x) {
+                    uint32_t i0, i1, i2;
+                    if (ax == 0)      { i0 = o0[0] + b; i1 = o0[1] + y; i2 = o0[2] + x; }
+                    else if (ax == 1) { i0 = o0[0] + y; i1 = o0[1] + b; i2 = o0[2] + x; }
+                    else              { i0 = o0[0] + y; i1 = o0[1] + x; i2 = o0[2] + b; }
+                    sub[static_cast<size_t>(b) * cHW + y * W + x] =
+                        orig[(static_cast<size_t>(i0) * d1 + i1) * d2 + i2];
+                }
+            }
+        }
+        return sub;
+    };
+
+    int best_ax = 0;
+    double best_score = 1e30;
+    for (int ax = 0; ax < 3; ++ax) {
+        int B = static_cast<int>(sd[ax]);
+        int H = static_cast<int>(sd[(ax == 0) ? 1 : 0]);
+        int W = static_cast<int>(sd[(ax == 2) ? 1 : 2]);
+        if (B < 2 || H < 4 || W < 4) continue;
+        auto sub = extract_ax(ax);
+        double sc = score_sub(sub, B, H, W, true);
+        if (sc < best_score) { best_score = sc; best_ax = ax; }
+    }
+    // Also score SPEC_NONE (plain 2D 5/3 without LDU on axis 0) so non-spectral 3D volumes skip harmful LDU
+    if (sd[1] >= 4 && sd[2] >= 4) {
+        auto sub_none = extract_ax(0);
+        double sc_none = score_sub(sub_none, static_cast<int>(sd[0]), static_cast<int>(sd[1]), static_cast<int>(sd[2]), false);
+        if (sc_none < best_score) return -1;
     }
     return best_ax;
 }
@@ -1955,13 +2017,15 @@ static BlindResult encode_hnd3_blind(const uint8_t* raw_bytes, size_t n_bytes, u
             if (dt_code == DT_I16)      for (size_t i = 0; i < n; ++i) xi[i] = read_le<int16_t>(raw_bytes + i * 2);
             else if (dt_code == DT_U16) for (size_t i = 0; i < n; ++i) xi[i] = read_le<uint16_t>(raw_bytes + i * 2);
             else                        for (size_t i = 0; i < n; ++i) xi[i] = read_le<int32_t>(raw_bytes + i * 4);
-            uint8_t sp_ax = choose_spectral_axis_cpp(xi.data(), static_cast<uint32_t>(d0),
-                                                     static_cast<uint32_t>(d1), static_cast<uint32_t>(d2), n_threads);
+            int sp_ax = choose_spectral_axis_cpp(xi.data(), static_cast<uint32_t>(d0),
+                                                 static_cast<uint32_t>(d1), static_cast<uint32_t>(d2), n_threads);
             xi.clear(); xi.shrink_to_fit();
             br.d0 = static_cast<uint32_t>(d0); br.d1 = static_cast<uint32_t>(d1); br.d2 = static_cast<uint32_t>(d2);
             br.spec_axis = sp_ax;
-            br.blob = encode_hnd3(raw_bytes, br.d0, br.d1, br.d2, dt_code, spec_mode,
-                                  n_lv, sp_ax, base_k, n_stripes_req, FLAG_BLIND, n_threads);
+            std::string eff_mode = (sp_ax < 0) ? "none" : spec_mode;
+            uint8_t eff_ax = (sp_ax < 0) ? 0 : static_cast<uint8_t>(sp_ax);
+            br.blob = encode_hnd3(raw_bytes, br.d0, br.d1, br.d2, dt_code, eff_mode,
+                                  n_lv, eff_ax, base_k, n_stripes_req, FLAG_BLIND, n_threads);
             return br;
         }
     }
@@ -1991,10 +2055,11 @@ struct DecodedCube {
     uint32_t d0 = 0, d1 = 0, d2 = 0;
     uint8_t dt_code = 0;
     bool sha_ok = false;
+    bool sha_checked = false;
 };
 
 static DecodedCube decode_hnd3(const uint8_t* data, size_t len, int stop_layer, int max_level,
-                               bool verify_sha, int n_threads) {
+                               bool verify_sha, int n_threads, uint64_t max_samples = 512000000ULL) {
     if (len < HDR_SIZE || std::memcmp(data, MAGIC, 4) != 0 || data[4] != VERSION)
         throw std::runtime_error("Invalid HND3 header");
     uint8_t flags     = data[5];
@@ -2019,8 +2084,8 @@ static DecodedCube decode_hnd3(const uint8_t* data, size_t len, int stop_layer, 
     if (d0 == 0 || d1 == 0 || d2 == 0)
         throw std::runtime_error("Zero dimension in HND3 header");
     uint64_t tot64 = static_cast<uint64_t>(d0) * d1;
-    if (tot64 > 512000000ULL || tot64 * d2 > 512000000ULL)
-        throw std::runtime_error("HND3 cube dimensions exceed 512M sample safety cap");
+    if (tot64 > max_samples || tot64 * d2 > max_samples)
+        throw std::runtime_error("HND3 cube dimensions exceed sample safety cap");
     size_t tot = static_cast<size_t>(tot64 * d2);
     size_t itemsize = (dt_code == DT_I32) ? 4 : 2;
     DecodedCube res; res.d0 = d0; res.d1 = d1; res.d2 = d2; res.dt_code = dt_code;
@@ -2028,23 +2093,34 @@ static DecodedCube decode_hnd3(const uint8_t* data, size_t len, int stop_layer, 
     if (flags & FLAG_RAW) {
         if (tot * itemsize > len - HDR_SIZE) throw std::runtime_error("Truncated raw HND3 stream");
         res.raw_bytes.assign(data + HDR_SIZE, data + HDR_SIZE + tot * itemsize);
+        res.sha_checked = verify_sha;
         res.sha_ok = (!verify_sha) || (sha256_bytes(res.raw_bytes.data(), res.raw_bytes.size()) == sha_exp);
         if (verify_sha && !res.sha_ok) throw std::runtime_error("SHA-256 mismatch on raw HND3!");
         return res;
     }
 
     if (spec_len > len - HDR_SIZE) throw std::runtime_error("Truncated HND3 spectral header");
-    if (tot > std::max<size_t>(65536ULL, len * 256ULL))
-        throw std::runtime_error("HND3 header sample count implausible for compressed stream size");
     uint32_t dims[3] = {d0, d1, d2};
     int B = static_cast<int>(dims[spec_axis]);
     int H = static_cast<int>(dims[(spec_axis == 0) ? 1 : 0]);
     int W = static_cast<int>(dims[(spec_axis == 2) ? 1 : 2]);
     if (n_stripes > B) throw std::runtime_error("n_stripes > B in HND3 header");
+
+    // Pre-parse and validate the full spectral header BEFORE allocating cube buffers
+    std::vector<int32_t> spec_mu;
+    std::vector<LduStage> spec_stages;
     if (spec_code != SPEC_NONE) {
-        if (spec_len < 4) throw std::runtime_error("Truncated spectral header");
-        if (read_le<uint16_t>(data + HDR_SIZE) != static_cast<uint16_t>(B))
-            throw std::runtime_error("Spectral band count mismatch");
+        size_t sp = HDR_SIZE, sp_end = HDR_SIZE + spec_len;
+        if (sp + 4 > sp_end) throw std::runtime_error("Truncated spectral header");
+        int Bs = read_le<uint16_t>(data + sp); sp += 2;
+        int n_stages = read_le<uint16_t>(data + sp); sp += 2;
+        if (Bs != B) throw std::runtime_error("Spectral band count mismatch");
+        if (static_cast<size_t>(B) * 4 > sp_end - sp) throw std::runtime_error("Truncated spectral mu");
+        spec_mu.resize(B);
+        for (int b = 0; b < B; ++b) { spec_mu[b] = read_le<int32_t>(data + sp); sp += 4; }
+        spec_stages.reserve(std::min(n_stages, 4096));
+        for (int s = 0; s < n_stages; ++s) spec_stages.push_back(unpack_ldu_stage(data, sp, sp_end, B));
+        if (sp != sp_end) throw std::runtime_error("Spectral header length mismatch");
     }
     size_t HW = static_cast<size_t>(H) * W;
 #if defined(HND3_FORCE_SCALAR)
@@ -2074,17 +2150,20 @@ static DecodedCube decode_hnd3(const uint8_t* data, size_t len, int stop_layer, 
         }
     }
 
-    // Decode base layer level-by-level: (orientations * n_stripes) tasks in parallel across ALL cores!
+    // Decode base layer level-by-level with LAZY per-level allocation (LL decoded first ->
+    // forged headers fail before fine subbands are allocated, while valid >256x streams succeed!)
     std::vector<std::vector<int64_t>> cur_subs(n_subs), par_mid(n_subs);
-    for (size_t si = 0; si < n_subs; ++si) {
-        size_t ssz = static_cast<size_t>(B) * sched[si].h() * sched[si].w();
-        cur_subs[si].assign(ssz, 0);
-        par_mid[si].assign(ssz, 0);
-    }
     for (int lv = 0; lv <= static_cast<int>(plan.size()); ++lv) {
         if (base_k == 0 && lv > lv_cap) break;
         std::vector<size_t> lv_subs;
-        for (size_t si = 0; si < n_subs; ++si) if (sched[si].lv == lv) lv_subs.push_back(si);
+        for (size_t si = 0; si < n_subs; ++si) {
+            if (sched[si].lv == lv) {
+                lv_subs.push_back(si);
+                size_t ssz = static_cast<size_t>(B) * sched[si].h() * sched[si].w();
+                cur_subs[si].assign(ssz, 0);
+                par_mid[si].assign(ssz, 0);
+            }
+        }
         size_t lt = lv_subs.size() * n_stripes;
         parallel_for(lt, n_threads, [&](size_t t0, size_t t1) {
             for (size_t k_idx = t0; k_idx < t1; ++k_idx) {
@@ -2114,6 +2193,12 @@ static DecodedCube decode_hnd3(const uint8_t* data, size_t len, int stop_layer, 
         });
     }
     par_mid.clear();
+    // Zero-fill any un-decoded high levels when max_level < plan.size() on base_k == 0
+    for (size_t si = 0; si < n_subs; ++si) {
+        if (cur_subs[si].empty()) {
+            cur_subs[si].assign(static_cast<size_t>(B) * sched[si].h() * sched[si].w(), 0);
+        }
+    }
 
     // Decode refinement layers k = base_k - 1 .. k_target across ALL cores!
     for (int k = static_cast<int>(base_k) - 1; k >= k_target; --k) {
@@ -2184,22 +2269,12 @@ static DecodedCube decode_hnd3(const uint8_t* data, size_t len, int stop_layer, 
     dwt53_2d_cube(work.data(), B, H, W, plan, true, n_threads);
 
     if (spec_code != SPEC_NONE) {
-        size_t sp = HDR_SIZE, sp_end = HDR_SIZE + spec_len;
-        if (sp + 4 > sp_end) throw std::runtime_error("Truncated spectral header");
-        int Bs = read_le<uint16_t>(data + sp); sp += 2;
-        int n_stages = read_le<uint16_t>(data + sp); sp += 2;
-        if (Bs != B) throw std::runtime_error("Spectral band count mismatch");
-        if (static_cast<size_t>(B) * 4 > sp_end - sp) throw std::runtime_error("Truncated spectral mu");
-        std::vector<int32_t> mu(B);
-        for (int b = 0; b < B; ++b) { mu[b] = read_le<int32_t>(data + sp); sp += 4; }
-        std::vector<LduStage> stages; stages.reserve(std::min(n_stages, 4096));
-        for (int s = 0; s < n_stages; ++s) stages.push_back(unpack_ldu_stage(data, sp, sp_end, B));
-        if (sp != sp_end) throw std::runtime_error("Spectral header length mismatch");
-        for (int s = n_stages - 1; s >= 0; --s) ldu_apply_stage(work.data(), HW, stages[s], true, use_i32_neon, n_threads);
+        for (int s = static_cast<int>(spec_stages.size()) - 1; s >= 0; --s)
+            ldu_apply_stage(work.data(), HW, spec_stages[s], true, use_i32_neon, n_threads);
         parallel_for(static_cast<size_t>(B), n_threads, [&](size_t b0, size_t b1) {
             for (size_t b = b0; b < b1; ++b) {
                 int64_t* row = work.data() + b * HW;
-                int64_t m = mu[b];
+                int64_t m = spec_mu[b];
                 for (size_t i = 0; i < HW; ++i) row[i] += m;
             }
         });
@@ -2229,10 +2304,12 @@ static DecodedCube decode_hnd3(const uint8_t* data, size_t len, int stop_layer, 
     }
 
     if (verify_sha && is_exact) {
+        res.sha_checked = true;
         res.sha_ok = (sha256_bytes(res.raw_bytes.data(), res.raw_bytes.size()) == sha_exp);
         if (!res.sha_ok) throw std::runtime_error("SHA-256 verification FAILED on lossless HND3 decode!");
     } else {
-        res.sha_ok = true;
+        res.sha_checked = false;
+        res.sha_ok = false;
     }
     return res;
 }
@@ -2260,7 +2337,8 @@ int main(int argc, char** argv) {
         if (argc < 3) {
             std::cerr << "Usage:\n"
                       << "  hnd3 enc <in.raw> <out.hnd3> (--shape D0,D1,D2 | --blind) --dtype u16|i16|i32\n"
-                      << "           [--base-k 0|6] [--mode auto|full|clustered] [--stripes 16] [--spec-axis 0] [--threads N]\n"
+                      << "           [--base-k 0..15] [--mode auto|full|clustered|none] [--levels 0..8]\n"
+                      << "           [--stripes 1..64] [--spec-axis 0|1|2] [--threads N] [--no-verify]\n"
                       << "  hnd3 dec <in.hnd3> [out.raw] [--stop-layer K] [--max-level L] [--threads N] [--bench]\n";
             return 1;
         }
@@ -2271,14 +2349,15 @@ int main(int argc, char** argv) {
             if (argc < 4) throw std::runtime_error("enc requires <in.raw> <out.hnd3>");
             std::string in_path = argv[2], out_path = argv[3];
             uint32_t d0 = 0, d1 = 0, d2 = 0;
+            bool has_shape = false, has_dtype = false, blind = false, verify_rt = true;
             uint8_t dt_code = hnd3::DT_U16;
             std::string mode = "auto";
-            uint8_t base_k = 6, spec_axis = 0, n_lv = 3, n_stripes = 16;
-            bool blind = false;
+            int base_k_i = 6, spec_axis_i = 0, n_lv_i = 3, n_stripes_i = 16;
             for (int i = 4; i < argc; ++i) {
                 std::string a = argv[i];
                 if (a == "--shape" && i + 1 < argc) {
                     if (std::sscanf(argv[++i], "%u,%u,%u", &d0, &d1, &d2) != 3) throw std::runtime_error("Bad --shape");
+                    has_shape = true;
                 } else if (a == "--blind") {
                     blind = true;
                 } else if (a == "--dtype" && i + 1 < argc) {
@@ -2286,44 +2365,88 @@ int main(int argc, char** argv) {
                     if (dt == "i16") dt_code = hnd3::DT_I16;
                     else if (dt == "u16") dt_code = hnd3::DT_U16;
                     else if (dt == "i32") dt_code = hnd3::DT_I32;
-                    else throw std::runtime_error("Bad --dtype");
+                    else throw std::runtime_error("Bad --dtype (expected u16|i16|i32)");
+                    has_dtype = true;
                 } else if (a == "--base-k" && i + 1 < argc) {
-                    base_k = static_cast<uint8_t>(std::atoi(argv[++i]));
+                    base_k_i = std::atoi(argv[++i]);
                 } else if (a == "--mode" && i + 1 < argc) {
                     mode = argv[++i];
                 } else if (a == "--stripes" && i + 1 < argc) {
-                    n_stripes = static_cast<uint8_t>(std::max(1, std::min(64, std::atoi(argv[++i]))));
+                    n_stripes_i = std::atoi(argv[++i]);
                 } else if (a == "--spec-axis" && i + 1 < argc) {
-                    spec_axis = static_cast<uint8_t>(std::atoi(argv[++i]));
+                    spec_axis_i = std::atoi(argv[++i]);
                 } else if (a == "--levels" && i + 1 < argc) {
-                    n_lv = static_cast<uint8_t>(std::atoi(argv[++i]));
+                    n_lv_i = std::atoi(argv[++i]);
                 } else if (a == "--threads" && i + 1 < argc) {
                     n_threads = std::max(1, std::atoi(argv[++i]));
+                } else if (a == "--verify") {
+                    verify_rt = true;
+                } else if (a == "--no-verify") {
+                    verify_rt = false;
+                } else {
+                    throw std::runtime_error("Unknown or incomplete option: " + a);
                 }
             }
+            if (!has_dtype) throw std::runtime_error("Missing required --dtype u16|i16|i32");
+            if (!blind && !has_shape) throw std::runtime_error("Must pass either --shape D0,D1,D2 or --blind");
+            if (blind && has_shape) throw std::runtime_error("Cannot pass both --shape and --blind");
+            if (base_k_i < 0 || base_k_i > 15) throw std::runtime_error("--base-k must be in 0..15");
+            if (spec_axis_i < 0 || spec_axis_i > 2) throw std::runtime_error("--spec-axis must be in 0..2");
+            if (n_lv_i < 0 || n_lv_i > 8) throw std::runtime_error("--levels must be in 0..8");
+            if (n_stripes_i < 1 || n_stripes_i > 64) throw std::runtime_error("--stripes must be in 1..64");
+            if (mode != "auto" && mode != "full" && mode != "clustered" && mode != "none")
+                throw std::runtime_error("Bad --mode (expected auto|full|clustered|none)");
+
+            uint8_t base_k = static_cast<uint8_t>(base_k_i);
+            uint8_t spec_axis = static_cast<uint8_t>(spec_axis_i);
+            uint8_t n_lv = static_cast<uint8_t>(n_lv_i);
+            uint8_t n_stripes = static_cast<uint8_t>(n_stripes_i);
+            size_t itemsize = (dt_code == hnd3::DT_I32) ? 4 : 2;
+
             auto raw = read_file_bytes(in_path);
+            if (!blind) {
+                if (d0 == 0 || d1 == 0 || d2 == 0) throw std::runtime_error("Zero dimension in --shape");
+                uint64_t tot64 = static_cast<uint64_t>(d0) * d1;
+                if (tot64 > 512000000ULL || tot64 * d2 > 512000000ULL)
+                    throw std::runtime_error("Shape exceeds 512M sample safety cap");
+                if (tot64 * d2 * itemsize != raw.size())
+                    throw std::runtime_error("Input file size (" + std::to_string(raw.size()) +
+                                             " B) does not match shape*itemsize (" +
+                                             std::to_string(tot64 * d2 * itemsize) + " B)");
+            } else {
+                if (raw.empty() || (raw.size() % itemsize != 0))
+                    throw std::runtime_error("Input byte size must be non-empty and divisible by dtype itemsize");
+            }
+
             auto t0 = std::chrono::steady_clock::now();
             if (blind) {
                 auto br = hnd3::encode_hnd3_blind(raw.data(), raw.size(), dt_code, mode, n_lv, base_k, n_stripes, n_threads);
                 double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+                if (verify_rt) {
+                    auto chk = hnd3::decode_hnd3(br.blob.data(), br.blob.size(), 0, -1, true, n_threads);
+                    if (chk.raw_bytes != raw) throw std::runtime_error("Encode round-trip verification FAILED!");
+                }
                 write_file_bytes(out_path, br.blob);
-                size_t itemsize = (dt_code == hnd3::DT_I32) ? 4 : 2;
                 double n_samp = double(raw.size() / itemsize);
                 std::printf("BLIND-ENC strides=[");
                 for (size_t i = 0; i < br.strides.size(); ++i) std::printf("%s%zu", i ? "," : "", br.strides[i]);
-                std::printf("] shape=(%u,%u,%u) spec_ax=%d base_k=%u: %zu -> %zu B (%.3f b/s, %.2fx) %.1f MB/s (%.3fs)\n",
+                std::printf("] shape=(%u,%u,%u) spec_ax=%d base_k=%u: %zu -> %zu B (%.3f b/s, %.2fx) %.1f MB/s (%.3fs) VERIFY=%s\n",
                             br.d0, br.d1, br.d2, br.spec_axis, base_k, raw.size(), br.blob.size(),
                             br.blob.size() * 8.0 / n_samp, double(raw.size()) / br.blob.size(),
-                            raw.size() / 1e6 / std::max(sec, 1e-6), sec);
+                            raw.size() / 1e6 / std::max(sec, 1e-6), sec, verify_rt ? "PASS" : "SKIP");
             } else {
                 auto blob = hnd3::encode_hnd3(raw.data(), d0, d1, d2, dt_code, mode, n_lv, spec_axis, base_k, n_stripes, 0, n_threads);
                 double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+                if (verify_rt) {
+                    auto chk = hnd3::decode_hnd3(blob.data(), blob.size(), 0, -1, true, n_threads);
+                    if (chk.raw_bytes != raw) throw std::runtime_error("Encode round-trip verification FAILED!");
+                }
                 write_file_bytes(out_path, blob);
                 double n_samp = double(d0) * d1 * d2;
-                std::printf("ENC (%u,%u,%u) base_k=%u stripes=%u mode=%s threads=%d: %zu -> %zu B (%.3f b/s, %.2fx) %.1f MB/s (%.3fs)\n",
+                std::printf("ENC (%u,%u,%u) base_k=%u stripes=%u mode=%s threads=%d: %zu -> %zu B (%.3f b/s, %.2fx) %.1f MB/s (%.3fs) VERIFY=%s\n",
                             d0, d1, d2, base_k, n_stripes, mode.c_str(), n_threads, raw.size(), blob.size(),
                             blob.size() * 8.0 / n_samp, double(raw.size()) / blob.size(),
-                            raw.size() / 1e6 / std::max(sec, 1e-6), sec);
+                            raw.size() / 1e6 / std::max(sec, 1e-6), sec, verify_rt ? "PASS" : "SKIP");
             }
             return 0;
         } else if (cmd == "dec") {
@@ -2338,6 +2461,7 @@ int main(int argc, char** argv) {
                 else if (a == "--threads" && i + 1 < argc) n_threads = std::max(1, std::atoi(argv[++i]));
                 else if (a == "--bench") bench = true;
                 else if (out_path.empty() && a[0] != '-') out_path = a;
+                else throw std::runtime_error("Unknown or incomplete option: " + a);
             }
             auto blob = read_file_bytes(in_path);
             int reps = bench ? 3 : 1;
@@ -2350,11 +2474,12 @@ int main(int argc, char** argv) {
                 if (sec < best_sec) best_sec = sec;
             }
             if (!out_path.empty()) write_file_bytes(out_path, dec.raw_bytes);
+            const char* sha_str = dec.sha_checked ? (dec.sha_ok ? "PASS" : "FAIL") : "N/A (preview)";
             std::printf("DEC (%u,%u,%u) stop_layer=%d threads=%d: %zu -> %zu B  %.1f MB/s (%.3fs)  SHA256=%s\n",
                         dec.d0, dec.d1, dec.d2, stop_layer, n_threads, blob.size(), dec.raw_bytes.size(),
-                        dec.raw_bytes.size() / 1e6 / std::max(best_sec, 1e-6), best_sec,
-                        dec.sha_ok ? "PASS" : "FAIL");
+                        dec.raw_bytes.size() / 1e6 / std::max(best_sec, 1e-6), best_sec, sha_str);
             return 0;
+#ifdef HND3_ENABLE_FUZZ
         } else if (cmd == "fuzz") {
             auto seed = read_file_bytes(argv[2]);
             int iters = (argc >= 4) ? std::atoi(argv[3]) : 10000;
@@ -2367,42 +2492,50 @@ int main(int argc, char** argv) {
                 std::vector<uint8_t> mut = seed;
                 uint64_t mode = nxt() % 5;
                 if (mode == 0 && !mut.empty()) {
-                    // Truncate at random offset (heavy focus on header & early bytes)
                     size_t cut = (nxt() % 2 == 0) ? (nxt() % std::min<size_t>(mut.size(), 512)) : (nxt() % mut.size());
                     mut.resize(cut);
                 } else if (mode == 1 && !mut.empty()) {
-                    // Flip 1..8 random bytes in header/LDU/rANS tables
                     int nf = 1 + static_cast<int>(nxt() % 8);
                     for (int f = 0; f < nf; ++f) {
                         size_t p = (nxt() % 2 == 0) ? (nxt() % std::min<size_t>(mut.size(), 512)) : (nxt() % mut.size());
                         mut[p] ^= static_cast<uint8_t>(1U << (nxt() & 7));
                     }
                 } else if (mode == 2 && mut.size() >= 62) {
-                    // Corrupt header dims / spec_len / stripe count / flags
                     size_t p = 4 + (nxt() % 58);
                     mut[p] = static_cast<uint8_t>(nxt() & 0xFF);
                 } else if (mode == 3) {
-                    // Completely random bytes (with occasional valid HND3 magic)
                     size_t sz = nxt() % 1024;
                     mut.resize(sz);
                     for (size_t k = 0; k < sz; ++k) mut[k] = static_cast<uint8_t>(nxt() & 0xFF);
                     if (sz >= 5 && (nxt() & 1)) { std::memcpy(mut.data(), hnd3::MAGIC, 4); mut[4] = hnd3::VERSION; }
                 } else if (!mut.empty()) {
-                    // Overwrite random slice inside payload
                     size_t p = nxt() % mut.size();
                     mut[p] = static_cast<uint8_t>(nxt() & 0xFF);
                 }
                 try {
-                    auto d = hnd3::decode_hnd3(mut.data(), mut.size(), 0, -1, true, 1);
+                    auto d = hnd3::decode_hnd3(mut.data(), mut.size(), 0, -1, true, 1, 8000000ULL);
                     (void)d;
                     accepted++;
                 } catch (const std::exception&) {
                     rejected++;
                 }
             }
-            std::printf("FUZZ PASS: %d iterations (%d cleanly rejected, %d accepted, 0 crashes/ASan/UBSan)\n",
-                        iters, rejected, accepted);
+            std::string san;
+#if defined(__SANITIZE_ADDRESS__)
+            san += "ASan+";
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+            san += "ASan+";
+#endif
+#endif
+#if defined(_LIBCPP_HARDENING_MODE)
+            san += "libc++_hardened+";
+#endif
+            san += "UBSan/bounds";
+            std::printf("FUZZ PASS: %d iterations (%d cleanly rejected, %d accepted, 0 crashes/%s)\n",
+                        iters, rejected, accepted, san.c_str());
             return 0;
+#endif
         } else {
             throw std::runtime_error("Unknown command: " + cmd);
         }

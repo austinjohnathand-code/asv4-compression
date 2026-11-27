@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (Ubuntu x86_64)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libzstd-dev python3-pip
+          python3 -m pip install --upgrade numpy scipy numba zstandard
+
+      - name: Install dependencies (macOS ARM64)
+        if: runner.os == 'macOS'
+        run: |
+          brew install zstd
+          python3 -m pip install --upgrade numpy scipy numba zstandard
+
+      - name: Build all C++20 targets (0 warnings)
+        run: make all
+
+      - name: Run full test, UBSan, NEON/scalar parity, and fuzz verification
+        run: make test
+
+      - name: Cross-architecture decode sanity (deterministic synthetic stream)
+        run: |
+          python3 - << 'EOF'
+          import hashlib, subprocess, numpy as np
+          rng = np.random.default_rng(2026)
+          cube = rng.integers(-4000, 4000, size=(32, 48, 48), dtype="<i2")
+          cube.tofile("/tmp/ci_cube.raw")
+          for k in ("0", "6"):
+              subprocess.run(
+                  ["./hnd3", "enc", "/tmp/ci_cube.raw", f"/tmp/ci_k{k}.hnd3",
+                   "--shape", "32,48,48", "--dtype", "i16", "--base-k", k],
+                  check=True,
+              )
+              subprocess.run(["./hnd3", "dec", f"/tmp/ci_k{k}.hnd3", f"/tmp/ci_k{k}.raw"], check=True)
+              assert open(f"/tmp/ci_k{k}.raw", "rb").read() == cube.tobytes()
+              print(f"k={k} compressed sha256:", hashlib.sha256(open(f"/tmp/ci_k{k}.hnd3", "rb").read()).hexdigest())
+          EOF

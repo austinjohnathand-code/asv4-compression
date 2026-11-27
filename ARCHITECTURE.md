@@ -194,9 +194,9 @@ sequenceDiagram
 
 ---
 
-## 6. HND3: Reversible N-D Hyperspectral & Scientific Tensor Architecture (Phases 0–3)
+## 6. HND3: Reversible 3D Hyperspectral Tensor Architecture (Phases 0–3)
 
-Alongside ASV4's 1D/record streaming engine, **HND3 (`phase3-v3.1`, [`cpp/hnd3.cpp`](cpp/hnd3.cpp))** is a zero-dependency C++20 ARM64 NEON reversible 3D/N-D tensor codec (wire-compatible with [`phase3_codec.py`](phase3_codec.py), with bit-exact `-DHND3_FORCE_SCALAR` parity) developed through staged empirical falsification across three public hyperspectral cubes (`Indian Pines`, `Salinas`, `Pavia University`) and validated on an unseen `132.84 MB` (`int16`) / `265.67 MB` (`int32`) 224-band NASA AVIRIS holdout plus non-hyperspectral 3D microscopy/MRI controls.
+Alongside ASV4's 1D/record streaming engine, **HND3 (`phase3-v3.2`, [`cpp/hnd3.cpp`](cpp/hnd3.cpp))** is a zero-dependency C++20 reversible 3D tensor codec (wire-compatible with [`phase3_codec.py`](phase3_codec.py), with bit-exact ARM64 NEON ↔ `-DHND3_FORCE_SCALAR` parity and variable-width escape coding supporting full-range `int32` inputs up to `|v| < 2^62`). It was developed across `Indian Pines`, `Salinas`, and `Pavia University`, and validated out-of-sample on a `132.84 MB` 224-band NASA AVIRIS scene plus non-hyperspectral 3D microscopy and MRI controls.
 
 ### 6.1 End-to-End HND3 Pipeline (Explicit & Native C++20 Blind Track A)
 
@@ -224,7 +224,7 @@ flowchart TD
 
 ### 6.2 Complete-Pivoted `LDU`-RKLT, Rounding-Noise Audit, & 16-Stripe 7-Layer Embedded Layout
 
-Complete-pivoted LU ($P\,\mathrm{diag}(s_0)\,U_{\text{KLT}}\,Q = L\,\mathrm{diag}(s_d)\,D_{\text{ladder}}\,U$) bounds all off-diagonal triangular entries to $|L_{ij}|, |U_{ij}| \le 1$ (stored losslessly in Q15 `int16`) and factors $D$ via a greedy log-balanced Daubechies-Sweldens 3-rounding diagonal ladder (`0` Givens fallbacks up to full `224×224`). Unlike Phase 0's row-pivoted SERM (whose Schur-complement multipliers exploded $> 10^4$ beyond $M = 8$), complete pivoting keeps cumulative diagonal multipliers bounded to $\max|c_k|, \max|1/c_k| \in [1.42, 2.32]$ across all four real cubes—holding empirical integer-lifting rounding noise against the exact same `float64` KLT matrix to **`RMS = 0.97–1.35` (`Var = 0.94–1.81`)** (`+0.014`–`+0.048 b/s` on Indian Pines/Salinas/PaviaU; `+0.397 b/s` on AVIRIS and `+0.952 b/s` on a `60 dB` synthetic stress test where sub-integer/unit tail-PC noise exposes the irreducible $O(1)$-LSB lifting floor; full table in [`PHASE3_REPORT.md`](PHASE3_REPORT.md) §2.5). Partitioning each subband into `n_stripes = min(B, 16)` independent band stripes unlocks all CPU cores while letting each energy tier (`PC1..PC12` vs. noise floor `PC190..PC204`) train its own compact 12-bit rANS frequency table.
+Complete-pivoted LU ($P\,\mathrm{diag}(s_0)\,U_{\text{KLT}}\,Q = L\,\mathrm{diag}(s_d)\,D_{\text{ladder}}\,U$) bounds all off-diagonal triangular entries to $|L_{ij}|, |U_{ij}| \le 1$ (stored losslessly in Q15 `int16`) and factors $D$ via a greedy log-balanced Daubechies-Sweldens 3-rounding diagonal ladder (no Givens fallback branch is required up to `224×224`). Unlike Phase 0's row-pivoted SERM (whose Schur-complement multipliers exploded $> 10^4$ beyond $M = 8$), complete pivoting keeps cumulative diagonal multipliers bounded to $\max|c_k|, \max|1/c_k| \in [1.42, 2.32]$ across all four real cubes—holding empirical integer-lifting rounding noise against the exact same `float64` KLT matrix to `RMS = 0.97–1.35` (`Var = 0.94–1.81`) and exact discrete zero-order entropy delta $\Delta H_{\text{disc}}$ to `+0.013`–`+0.055 b/s` on Indian Pines/Salinas/PaviaU (`+0.341 b/s` on AVIRIS and `+0.899 b/s` on a `60 dB` synthetic stress test where sub-integer/unit tail-PC noise exposes the irreducible $O(1)$-LSB lifting floor; full table in [`PHASE3_REPORT.md`](PHASE3_REPORT.md) §3). Partitioning each subband into `n_stripes = min(B, 16)` independent band stripes unlocks multi-core parallelism while letting each energy tier (`PC1..PC12` vs. noise floor `PC190..PC204`) train its own compact 12-bit rANS frequency table.
 
 ```mermaid
 flowchart LR

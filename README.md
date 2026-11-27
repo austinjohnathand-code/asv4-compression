@@ -1,15 +1,23 @@
-# ASV4 — Blind, Schema-Free Adaptive Stride-Transposition Streaming Compressor
+# `asv4-compression` — Two Lossless C++20 Codecs: ASV4 (Streaming 1D) & HND3 (3D Hyperspectral)
 
-**ASV4 (v4.1)** is a single-pass, pipe-safe, schema-free lossless compressor written in C++20 with ARM64 NEON SIMD intrinsics and native `libzstd 1.5.5`. Without knowing file formats, headers, or data types upfront, ASV4 discovers binary structure online, applies fused SIMD bijective transforms (including nibble-rotated byte-plane transposition `T2_NIBROT`), coalesces transformed and raw spans into lazy persistent `zstd` streams, and falls back transparently to raw `zstd --long=27` on unstructured or adversarial data.
+This repository contains **two independent C++20 lossless codecs** built under a staged falsification methodology:
 
-- **Beats dedicated & supervised baselines blindly on real LLM weights**:
-  - **OpenAI GPT-2 FP32 (`real_gpt2_f32.safetensors`, 522.7 MiB)**: **`394.91 MiB`** (**−10.38%** vs. `zstd -19 --long=27`, **−24.45%** vs. raw) at **211 MB/s** encode and **1,252 MB/s** decode on one ARM64 core — beating verified lossless **ZipNN 0.5.4 `float32` (`397.59 MiB`)**, **OpenZL `le32` (`398.43 MiB`)**, **Blosc2 (`401.61 MiB`)**, **OpenZL `Float32Deconstruct` (`402.50 MiB` aligned / `432.17 MiB` raw)**, and **OpenZL `struct4+TransposeSplit` (`404.12 MiB`)**.
-  - **SmolLM2-135M BF16 (`real_smollm2_bf16.safetensors`, 256.6 MiB)**: **`170.44 MiB`** (**−15.09%** vs. `zstd -3 --long=27`, **−33.58%** vs. raw) at **208 MB/s** encode and **927–936 MB/s** decode — beating verified lossless **ZipNN 0.5.4 `bfloat16` (`171.10 MiB`)**, **Blosc2 (`177.25 MiB`)**, **OpenZL `BFloat16Deconstruct` (`178.68 MiB`)**, and **OpenZL `le16` (`183.00 MiB`)**.
-- **Real scientific astronomy rasters (`real_hubble_eagle_f32.fits`, NASA/ESA Hubble WFPC2 `>f4`)**: **`15.28 MiB`** (**−16.86%** vs. `zstd -19 --long=27`, within `0.14 MiB` of supervised OpenZL `15.14 MiB`) at **146 MB/s** encode and **680 MB/s** decode.
-- **Zero-regression safety floor**: Worst-case overhead across all 5 negative & adversarial controls (1 GB / `953.7 MiB` `enwik9`, source `.tar`, 1,834 concatenated ARM64 Mach-O binaries, compressed media, CSPRNG random) is **`+0.0021%` (L3) / `+0.0028%` (L19)** — over 50× below the `0.15%` cap.
-- **Strictly monotonic, bounded, and hardened**: `L19 ≤ L3` on **16/16** datasets, **`32/32` streaming SHA-256 PASS**, **`0.89×` avg / `2.06×` max** Scoring Work Multiplier (`≤ 3.0×` budget), **`680–1,414 MB/s`** single-core decode, **`O(1)`** bounded zstd window memory (`≤ 192 MiB` combined dual-stream zstd window ceiling; peak OS process RSS `≤ 286.8 MiB` decode / `≤ 312.9 MiB` encode including 16 MiB I/O staging and frame buffers), UBSan-verified bounds checks, and portable FIPS 180-4 SHA-256 fallback (`-DASV3_FORCE_PORTABLE_SHA256`).
+1. **ASV4 (`v4.1`, [`v3/cpp/asv3.cpp`](v3/cpp/asv3.cpp) → `./asv4`)**: A single-pass, pipe-safe, schema-free streaming compressor (ARM64 NEON + `libzstd 1.5.5`) for binary dumps, neural network weights (`.safetensors`), and mixed structured files.
+2. **HND3 (`phase3-v3.2`, [`cpp/hnd3.cpp`](cpp/hnd3.cpp) → `./hnd3`)**: A zero-dependency C++20 reversible 3D tensor codec for hyperspectral cubes (`i16`/`u16`/`i32`) combining complete-pivoted integer `LDU`-RKLT, arbitrary-shape 2D 5/3 integer lifting, 16-stripe band-parallel 32-bit rANS, 7-layer progressive bitplane coding, and blind 3D stride/spectral-axis recovery (`--blind`).
 
-> **Units & Platform Scope**: In the **ASV4** section below, file sizes and OS Peak RSS use **binary `MiB` (`2^20 B`)** (matching [`v3/REPORT_V4.md`](v3/REPORT_V4.md)) while throughput is in decimal `MB/s` (`10^6 B/s`); in the **HND3** section, all sizes, RSS, and throughputs use **decimal `MB` (`10^6 B`)** (matching [`PHASE3_REPORT.md`](PHASE3_REPORT.md)). All benchmarks, UBSan runs, and 20,200-iteration `libc++` debug-hardened fuzzing were executed on **Apple Silicon ARM64**; portable scalar (`-DHND3_FORCE_SCALAR`) and portable SHA-256 (`-DASV3_FORCE_PORTABLE_SHA256`) paths are verified bit-exact on ARM64, while native Linux x86-64 CI round-trip and coverage-guided `libFuzzer` runs remain future work.
+> **Units, Hardware, & Scope**: Benchmarks ran on an **Apple M3 Max (16 logical CPUs, 128 GiB RAM, macOS 27.2.1, Apple Clang 16.0.0)**. In the **ASV4** section, file sizes and Peak RSS use **binary `MiB` (`2^20 B`)** (matching [`v3/REPORT_V4.md`](v3/REPORT_V4.md)) while throughput is in decimal `MB/s` (`10^6 B/s`). In the **HND3** section, all sizes, RSS, and throughputs use **decimal `MB` (`10^6 B`)** (matching [`PHASE3_REPORT.md`](PHASE3_REPORT.md)). GitHub Actions CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) builds and tests on both `ubuntu-latest` (`x86_64`) and `macos-latest` (`arm64`). Known limits: HND3 is 3D-only, holds full cubes in memory (`~17–22×` raw `i16` peak RSS; no tiling yet), has no guaranteed-$L_\infty$ near-lossless mode, and has not been benchmarked against CCSDS-123.0-B-2 (Issue 2).
+
+---
+
+## Part 1: ASV4 (`v4.1`) — Blind Streaming Compressor
+
+ASV4 discovers binary structure online without schemas or backward seeks, applies fused SIMD bijective transforms (including nibble-rotated byte-plane transposition `T2_NIBROT`), coalesces transformed and raw spans into lazy persistent `zstd` streams, and falls back to raw `zstd --long=27` on unstructured or adversarial data.
+
+- **Real public LLM weights & astronomy rasters** *(note: ZipNN optimizes for multi-threaded aligned tensor loading, whereas ASV4 is single-threaded and schema-free; single-run margins over ZipNN are `0.17%–0.39%`)*:
+  - **GPT-2 FP32 (`real_gpt2_f32.safetensors`, `522.7 MiB`)**: `394.91 MiB` (`−10.38%` vs. `zstd -19 --long=27`) at `211 MB/s` enc / `1,252 MB/s` dec (1T) vs. ZipNN 0.5.4 `397.59 MiB`, OpenZL `le32` `398.43 MiB`, Blosc2 `401.61 MiB`.
+  - **SmolLM2-135M BF16 (`real_smollm2_bf16.safetensors`, `256.6 MiB`)**: `170.44 MiB` (`−15.09%` vs. `zstd -3 --long=27`) at `208 MB/s` enc / `927 MB/s` dec (1T) vs. ZipNN 0.5.4 `171.10 MiB`, Blosc2 `177.25 MiB`, OpenZL `bf16Decon` `178.68 MiB`.
+  - **Hubble WFPC2 FITS (`real_hubble_eagle_f32.fits`, `29.5 MiB`)**: `15.28 MiB` (`−16.86%` vs. `zstd -19 --long=27`; supervised OpenZL `15.14 MiB`) at `146 MB/s` enc / `680 MB/s` dec.
+- **Anti-regression floor & bounds**: Worst-case overhead across all 5 negative/adversarial controls (`enwik9`, source `.tar`, Mach-O binaries, media, CSPRNG random) is `+0.0021%` (L3) / `+0.0028%` (L19). `L19 ≤ L3` on `16/16` datasets, `32/32` streaming SHA-256 PASS, `0.89×` avg / `2.06×` max Scoring Work Multiplier, `≤ 192 MiB` combined dual-stream zstd window ceiling (peak OS process RSS `≤ 286.8 MiB` decode / `≤ 312.9 MiB` encode), and UBSan-checked decoder bounds (10 crafted corrupt-stream tests; ASV4 has not been coverage-fuzzed).
 
 ---
 
@@ -67,20 +75,20 @@ See **[`ARCHITECTURE.md`](ARCHITECTURE.md)** for full Mermaid diagrams of the tw
 
 ---
 
-## HND3 — Reversible N-D Hyperspectral & Scientific Tensor Engine (`phase3-v3.1`)
+## Part 2: HND3 (`phase3-v3.2`) — Reversible 3D Hyperspectral Codec
 
-In addition to ASV4's 1D/record streaming engine, this repository includes **HND3** ([`cpp/hnd3.cpp`](cpp/hnd3.cpp) → `./hnd3`, wire-compatible with [`phase3_codec.py`](phase3_codec.py)), a **zero-dependency C++20 ARM64 NEON** reversible 3D/N-D tensor codec featuring complete-pivoted `LDU`-RKLT (`vmlal_s32` FMA with bit-exact `-DHND3_FORCE_SCALAR` parity), arbitrary-shape 2D 5/3 integer lifting, **16-stripe parallel 3D-context 32-bit rANS**, **single-stream 7-layer quality-embedded lossless coding**, built-in FIPS 180-4 SHA-256, and **windowed native C++20 blind stride-lattice recovery (`--blind`)**.
+**HND3** ([`cpp/hnd3.cpp`](cpp/hnd3.cpp) → `./hnd3`, wire-compatible with [`phase3_codec.py`](phase3_codec.py)) is a zero-dependency C++20 reversible 3D tensor codec featuring complete-pivoted `LDU`-RKLT (ARM64 NEON `vmlal_s32` for `i16`/`u16`, overflow-safe scalar `int64` + variable-width escape for full-range `i32`), arbitrary-shape 2D 5/3 integer lifting, 16-stripe parallel 3D-context 32-bit rANS, single-stream 7-layer progressive decoding (`base_k = 6`, supporting truncated layer prefixes), default-on encode-then-verify SHA-256 checking, and windowed native C++20 blind 3D shape recovery (`--blind`).
 
-### Real Public Hyperspectral Cubes (Exact Uncropped Apples-to-Apples, Decimal `MB = 10⁶ B`, All `SHA-256 PASS`)
+### Real Public Hyperspectral Cubes (Uncropped, Official References, Decimal `MB = 10⁶ B`, Best-of-3)
 
-| Uncropped Real Cube | Custom CCSDS-123.0-B-1 (`P=3 / P=15`) | Official `OpenJPEG J2K + LDU-RKLT` | **`.hnd3` One-Shot (`k=0`)** | **`.hnd3` 7-Layer (`k=6`)** | `k=6` Preview (Same File!) | Full Uncropped `--blind` (`6/6` Perms) |
-|---|---:|---:|---:|---:|---:|---:|
-| **Indian Pines** `(200, 145, 145)`, `8.41 MB` | `6.798 / 6.772 b/s` | `6.739 b/s` (`22 MB/s` dec) | `6.485 b/s` (`196 MB/s` dec) | **`6.561 b/s` (`2.44×`)** (`122 MB/s`) | `16.4%` (`1.07 b/s`) → **`54.1 dB`** (`530 MB/s`) | **`6/6` exact** (`6.485 b/s`) |
-| **Salinas** `(204, 512, 217)`, `45.33 MB` | `5.131 / 5.108 b/s` | `4.803 b/s` (`21 MB/s` dec) | `4.657 b/s` (`157 MB/s` dec) | **`4.628 b/s` (`3.46×`)** (`111 MB/s`) | **`3.4%` (`0.16 b/s`, `100×`)** → **`60.1 dB`** (`328 MB/s`) | **`6/6` exact** (`4.654–4.657 b/s`) |
-| **PaviaU** `(103, 610, 340)`, `42.72 MB` | `6.846 / 6.907 b/s` | `6.640 b/s` (`21 MB/s` dec) | `6.367 b/s` (`186 MB/s` dec) | **`6.354 b/s` (`2.52×`)** (`122 MB/s`) | `12.1%` (`0.77 b/s`, `21×`) → **`52.9 dB`** (`407 MB/s`) | **`6/6` exact** (`6.349–6.367 b/s`) |
-| **Unseen AVIRIS** `(224, 745, 398)`, `132.84 MB` | `3.112 / 3.078 b/s` | `3.068 b/s` (`27 MB/s` dec) | `3.068 b/s` (`159 MB/s` dec) | **`2.940 b/s` (`5.44×`)** (`117 MB/s`) | **`0.6%` (`0.02 b/s`, `888×`)** → **`55.3 dB`** (`318 MB/s`) | **`6/6` exact** (`3.068–3.113 b/s`) |
+| Uncropped Real Cube | Official `Empordà` CCSDS-123.0-B-1 (`P=3 / P=15` SA) | `LDU` + OpenJPEG J2K (`Dec 1T/MT`) | `LDU` + `cjxl 0.13` (`Dec MT`) | **HND3 `k=0` (`Dec 1T/MT`)** | **HND3 `k=6` (`Dec 1T/MT`)** | `k=6` Preview (`SAM_mean`) | `--blind` (`6/6` Perms) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **Indian Pines** `(200, 145, 145)`, `8.41 MB` | `6.579 / 6.545 b/s` | `6.739` (`22/167`) | `6.558` (`12`) | `6.485` (`70/205`) | `6.561` (`28/126`) | `16.4%` → `54.1 dB` (`0.32°`) | `6/6` exact |
+| **Salinas** `(204, 512, 217)`, `45.33 MB` | `4.881 / 4.864 b/s` | `4.803` (`22/63`) | **`4.043`** (`18`) | `4.657` (`38/157`) | `4.628` (`21/106`) | `3.4%` → `60.1 dB` (`0.34°`) | `6/6` exact |
+| **PaviaU** `(103, 610, 340)`, `42.72 MB` | `6.551 / 6.620 b/s` | `6.640` (`21/99`) | `6.558` (`33`) | `6.366` (`50/175`) | **`6.354`** (`26/125`) | `12.1%` → `52.9 dB` (`0.78°`) | `6/6` exact |
+| **AVIRIS Holdout** `(224, 745, 398)`, `132.84 MB` | `3.014 / 3.007 b/s` | `3.068` (`29/60`) | **`2.868`** (`19`) | `3.068` (`41/157`) | `2.940` (`23/116`) | `0.6%` → `55.3 dB` (`0.50°`) | `6/6` exact |
 
-See **[`PHASE3_REPORT.md`](PHASE3_REPORT.md)** for full 7-layer R-D tables (`k=6..0` bytes, `PSNR`, $L_\infty$, decode ms), `CCSDS-123 + 3D-rANS` / `CharLS JPEG-LS` / `ZFP` / `zstd -19` baselines, `265.67 MB` real `int32` overflow-safe results, non-hyperspectral 3D microscopy & MRI controls (including honest domain boundaries), Peak RSS measurements, NEON↔scalar SHA-256 parity, and 20,200-iteration UBSan + `libc++` debug fuzzing.
+*Reproduce all HND3 tables via `python3 bench/fetch_hnd3_data.py && make bench-hnd3`. See [`PHASE3_REPORT.md`](PHASE3_REPORT.md) for full 7-layer R-D curves (`k=6..0`, SAM, PSNR, $L_\infty$), discrete-entropy `LDU` rounding-noise audit, full-range `int32` (`±1.9e9`) verification, Peak RSS (`~17–22×` raw `i16`), and non-hyperspectral 3D controls (where `cjxl` beats HND3 on both microscopy and MRI).*
 
 ---
 
@@ -144,7 +152,9 @@ python3 v3/bench_final_refresh.py
 
 | Path | Description |
 |---|---|
-| [`Makefile`](Makefile) | Auto-detecting C++20 build (`make` → `./asv4`, `./hnd2`, `./hnd3`; `make bench`; `make test`) |
+| [`bench/fetch_hnd3_data.py`](bench/fetch_hnd3_data.py), [`bench/bench_hnd3.py`](bench/bench_hnd3.py) | Reproducible HND3 dataset SHA-256 fetcher & full benchmark suite (`make bench-hnd3`) |
+| [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Multi-platform GitHub Actions CI (`ubuntu-latest` x86_64 & `macos-latest` arm64) |
+| [`Makefile`](Makefile) | Auto-detecting C++20 build (`make`, `make bench`, `make bench-hnd3`, `make test`) |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | System architecture & Mermaid diagrams for both ASV4 v4.1 and HND3 (Phases 0–3) |
 | [`cpp/hnd3.cpp`](cpp/hnd3.cpp) | **Phase 3 zero-dependency C++20 NEON HND3 engine** (16-stripe rANS, `vmlal_s32` LDU, native `--blind`) |
 | [`cpp/hnd2.cpp`](cpp/hnd2.cpp) | Phase 2 C++20 NEON HND2 engine (7-layer quality-embedded lossless) |
@@ -175,13 +185,13 @@ python3 v3/bench_final_refresh.py
 - **P. Hao & Q. Shi (2001)**, *Matrix Factorizations for Reversible Integer Mapping*, IEEE Trans. Signal Processing (`PLUS` / SERM integer lifting).
 - **I. Daubechies & W. Sweldens (1998)**, *Factoring Wavelet Transforms into Lifting Steps*, J. Fourier Anal. Appl. (3-shear diagonal lifting & lifting framework).
 - **A. R. Calderbank, I. Daubechies, W. Sweldens, & B.-L. Yeo (1998)**, *Wavelet Transforms That Map Integers to Integers*, Appl. Comput. Harmon. Anal. (reversible 5/3 integer wavelet).
-- **L. Galli & S. Salzo (2004)**, *Lossless Hyperspectral Compression Using KLT*, IEEE IGARSS (reversible KLT for hyperspectral imagery).
-- **I. Blanes & J. Serra-Sagristà (2010)**, *Cost and Scalability Improvements to the Karhunen–Loève Transform for Remote-Sensing Image Coding*, IEEE Trans. Geosci. Remote Sens. 48(7); and *Clustered Reversible-KLT for Progressive Lossy-to-Lossless 3D Image Coding*, Proc. IEEE DCC 2009 (multilevel clustered RKLT lineage behind `clust` mode).
+- **L. Galli & S. Salzo (2004)**, *Lossless Hyperspectral Compression Using KLT*, Proc. IEEE IGARSS, vol. 1, p. 316 (quasi-complete-pivoted reversible KLT).
+- **I. Blanes & J. Serra-Sagristà (2009)**, *Clustered Reversible-KLT for Progressive Lossy-to-Lossless 3D Image Coding*, Proc. IEEE DCC 2009, pp. 233–242; and *Cost and Scalability Improvements to the Karhunen–Loève Transform for Remote-Sensing Image Coding*, IEEE Trans. Geosci. Remote Sens. 48(7), 2010 (multilevel clustered RKLT lineage behind `clust` mode).
 - **I. Blanes & J. Serra-Sagristà (2011)**, *Pairwise Orthogonal Transform for Spectral Image Coding*, IEEE Trans. Geosci. Remote Sens. 49(3) (published online 2010; POT spectral decorrelation).
 - **J. Duda (2009 / 2013)**, *Asymmetric Numeral Systems*, arXiv:0902.0271 / arXiv:1311.2540 (32-bit rANS entropy coding).
 - **A. de Cheveigné & H. Kawahara (2002)**, *YIN, a Fundamental Frequency Estimator for Speech and Music*, J. Acoust. Soc. Am. (rectified fundamental stride selection).
 - **CCSDS 123.0-B-1 / 123.0-B-2**, *Low-Complexity Lossless and Near-Lossless Multispectral and Hyperspectral Image Compression*, Consultative Committee for Space Data Systems.
-- **External reference implementations benchmarked**: `libzstd` (Meta), `OpenZL`, `Blosc2`, `ZipNN`, `OpenJPEG`, `CharLS`, and `ZFP` (via `imagecodecs`).
+- **External reference implementations benchmarked**: `libzstd` (Meta), `OpenZL`, `Blosc2`, `ZipNN`, UAB/ESA `Empordà` (CCSDS-123.0-B-1), `OpenJPEG`, `libjxl` (`cjxl`/`djxl` 0.13.0), `CharLS`, and `ZFP`.
 
 ### Public Datasets
 - **Hyperspectral cubes**: Purdue University / NASA AVIRIS *Indian Pines*, NASA/JPL AVIRIS *Salinas*, University of Pavia ROSIS *Pavia University*, and NASA AVIRIS holdout scene via HuggingFace `danjacobellis/aviris_1k_val`.
