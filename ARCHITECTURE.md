@@ -162,7 +162,7 @@ flowchart LR
 
 ## 5. Pipe-Safe Streaming Handshake & Hardened Decode (`run_decode`)
 
-Every `MetaRecord` and stream length is bounds-checked before dereferencing (verified 10/10 clean rejections on crafted OOB/corrupt streams under `-fsanitize=undefined`), and dual-stream memory is strictly $O(1)$ bounded (`128 MB` single-stream `S_RAW`; `128 MB` simultaneous dual-stream `64+64 MB`; `192 MB` ceiling for sequential dual-stream `128+64 MB`).
+Every `MetaRecord` and stream length is bounds-checked before dereferencing (verified 10/10 clean rejections on crafted OOB/corrupt streams under `-fsanitize=undefined` on ARM64), and dual-stream zstd window memory is strictly $O(1)$ bounded (`128 MiB` single-stream `S_RAW`; `128 MiB` simultaneous dual-stream `64+64 MiB`; `192 MiB` ceiling for sequential dual-stream `128+64 MiB`). Total OS process RSS—which additionally includes 16 MiB I/O flush-group staging, decompression frame buffers, and allocator overhead—peaks at `286.8 MiB` decode / `312.9 MiB` encode on `target_mixed_structured.bin`.
 
 ```mermaid
 sequenceDiagram
@@ -196,7 +196,7 @@ sequenceDiagram
 
 ## 6. HND3: Reversible N-D Hyperspectral & Scientific Tensor Architecture (Phases 0–3)
 
-Alongside ASV4's 1D/record streaming engine, **HND3 (`phase3-v3.0`, [`cpp/hnd3.cpp`](cpp/hnd3.cpp))** is a zero-dependency C++20 ARM64 NEON reversible 3D/N-D tensor codec (wire-compatible with [`phase3_codec.py`](phase3_codec.py)) developed through staged empirical falsification across three full native-resolution public hyperspectral cubes (`Indian Pines`, `Salinas`, `Pavia University`).
+Alongside ASV4's 1D/record streaming engine, **HND3 (`phase3-v3.1`, [`cpp/hnd3.cpp`](cpp/hnd3.cpp))** is a zero-dependency C++20 ARM64 NEON reversible 3D/N-D tensor codec (wire-compatible with [`phase3_codec.py`](phase3_codec.py), with bit-exact `-DHND3_FORCE_SCALAR` parity) developed through staged empirical falsification across three public hyperspectral cubes (`Indian Pines`, `Salinas`, `Pavia University`) and validated on an unseen `132.84 MB` (`int16`) / `265.67 MB` (`int32`) 224-band NASA AVIRIS holdout plus non-hyperspectral 3D microscopy/MRI controls.
 
 ### 6.1 End-to-End HND3 Pipeline (Explicit & Native C++20 Blind Track A)
 
@@ -222,9 +222,9 @@ flowchart TD
     LAY --> OUT
 ```
 
-### 6.2 Complete-Pivoted `LDU`-RKLT & 16-Stripe 7-Layer Embedded Layout
+### 6.2 Complete-Pivoted `LDU`-RKLT, Rounding-Noise Audit, & 16-Stripe 7-Layer Embedded Layout
 
-Complete-pivoted LU ($P\,\mathrm{diag}(s_0)\,U_{\text{KLT}}\,Q = L\,\mathrm{diag}(s_d)\,D_{\text{ladder}}\,U$) bounds all off-diagonal triangular entries to $|L_{ij}|, |U_{ij}| \le 1$ (stored losslessly in Q15 `int16`) and factors $D$ via a greedy log-balanced Daubechies-Sweldens 3-rounding diagonal ladder (`0` Givens fallbacks up to full `204×204`). Partitioning each subband into `n_stripes = min(B, 16)` independent band stripes unlocks all CPU cores while letting each energy tier (`PC1..PC12` vs. noise floor `PC190..PC204`) train its own compact 12-bit rANS frequency table.
+Complete-pivoted LU ($P\,\mathrm{diag}(s_0)\,U_{\text{KLT}}\,Q = L\,\mathrm{diag}(s_d)\,D_{\text{ladder}}\,U$) bounds all off-diagonal triangular entries to $|L_{ij}|, |U_{ij}| \le 1$ (stored losslessly in Q15 `int16`) and factors $D$ via a greedy log-balanced Daubechies-Sweldens 3-rounding diagonal ladder (`0` Givens fallbacks up to full `224×224`). Unlike Phase 0's row-pivoted SERM (whose Schur-complement multipliers exploded $> 10^4$ beyond $M = 8$), complete pivoting keeps cumulative diagonal multipliers bounded to $\max|c_k|, \max|1/c_k| \in [1.42, 2.32]$ across all four real cubes—holding empirical integer-lifting rounding noise against the exact same `float64` KLT matrix to **`RMS = 0.97–1.35` (`Var = 0.94–1.81`)** (`+0.014`–`+0.048 b/s` on Indian Pines/Salinas/PaviaU; `+0.397 b/s` on AVIRIS and `+0.952 b/s` on a `60 dB` synthetic stress test where sub-integer/unit tail-PC noise exposes the irreducible $O(1)$-LSB lifting floor; full table in [`PHASE3_REPORT.md`](PHASE3_REPORT.md) §2.5). Partitioning each subband into `n_stripes = min(B, 16)` independent band stripes unlocks all CPU cores while letting each energy tier (`PC1..PC12` vs. noise floor `PC190..PC204`) train its own compact 12-bit rANS frequency table.
 
 ```mermaid
 flowchart LR
@@ -234,7 +234,7 @@ flowchart LR
         H --> SP
     end
 
-    subgraph Base["Base Layer (k = base_k, e.g. q ~ 64, 15x-91x Preview)"]
+    subgraph Base["Base Layer (k = base_k, e.g. 0.6%-16.4% of stream, 15x-888x Preview)"]
         B0["Subband LL: Stripes 0..S-1 (16-ctx x 32-sym 12-bit rANS + 64-bit EB)"]
         B1["Subbands L3, L2, L1: Stripes 0..S-1 (Spatial + Parent + Cross-Band EMA Context)"]
         B0 --> B1

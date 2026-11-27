@@ -3,11 +3,13 @@
 **ASV4 (v4.1)** is a single-pass, pipe-safe, schema-free lossless compressor written in C++20 with ARM64 NEON SIMD intrinsics and native `libzstd 1.5.5`. Without knowing file formats, headers, or data types upfront, ASV4 discovers binary structure online, applies fused SIMD bijective transforms (including nibble-rotated byte-plane transposition `T2_NIBROT`), coalesces transformed and raw spans into lazy persistent `zstd` streams, and falls back transparently to raw `zstd --long=27` on unstructured or adversarial data.
 
 - **Beats dedicated & supervised baselines blindly on real LLM weights**:
-  - **OpenAI GPT-2 FP32 (`real_gpt2_f32.safetensors`, 522.7 MB)**: **`394.91 MB`** (**−10.38%** vs. `zstd -19 --long=27`, **−24.45%** vs. raw) at **211 MB/s** encode and **1,252 MB/s** decode on one ARM64 core — beating verified lossless **ZipNN 0.5.4 `float32` (`397.59 MB`)**, **OpenZL `le32` (`398.43 MB`)**, **Blosc2 (`401.61 MB`)**, **OpenZL `Float32Deconstruct` (`402.50 MB` aligned / `432.17 MB` raw)**, and **OpenZL `struct4+TransposeSplit` (`404.12 MB`)**.
-  - **SmolLM2-135M BF16 (`real_smollm2_bf16.safetensors`, 256.6 MB)**: **`170.44 MB`** (**−15.09%** vs. `zstd -3 --long=27`, **−33.58%** vs. raw) at **208 MB/s** encode and **927–936 MB/s** decode — beating verified lossless **ZipNN 0.5.4 `bfloat16` (`171.10 MB`)**, **Blosc2 (`177.25 MB`)**, **OpenZL `BFloat16Deconstruct` (`178.68 MB`)**, and **OpenZL `le16` (`183.00 MB`)**.
-- **Real scientific astronomy rasters (`real_hubble_eagle_f32.fits`, NASA/ESA Hubble WFPC2 `>f4`)**: **`15.28 MB`** (**−16.86%** vs. `zstd -19 --long=27`, within `0.14 MB` of supervised OpenZL `15.14 MB`) at **146 MB/s** encode and **680 MB/s** decode.
-- **Zero-regression safety floor**: Worst-case overhead across all 5 negative & adversarial controls (1 GB `enwik9`, source `.tar`, 1,834 concatenated ARM64 Mach-O binaries, compressed media, CSPRNG random) is **`+0.0021%` (L3) / `+0.0028%` (L19)** — over 50× below the `0.15%` cap.
-- **Strictly monotonic, bounded, and hardened**: `L19 ≤ L3` on **16/16** datasets, **`32/32` streaming SHA-256 PASS**, **`0.89×` avg / `2.06×` max** Scoring Work Multiplier (`≤ 3.0×` budget), **`680–1,414 MB/s`** single-core decode, **`O(1)`** bounded window memory (`≤ 192 MB` combined dual-stream ceiling), UBSan-verified bounds checks, and portable FIPS 180-4 SHA-256 fallback for Linux/x86-64.
+  - **OpenAI GPT-2 FP32 (`real_gpt2_f32.safetensors`, 522.7 MiB)**: **`394.91 MiB`** (**−10.38%** vs. `zstd -19 --long=27`, **−24.45%** vs. raw) at **211 MB/s** encode and **1,252 MB/s** decode on one ARM64 core — beating verified lossless **ZipNN 0.5.4 `float32` (`397.59 MiB`)**, **OpenZL `le32` (`398.43 MiB`)**, **Blosc2 (`401.61 MiB`)**, **OpenZL `Float32Deconstruct` (`402.50 MiB` aligned / `432.17 MiB` raw)**, and **OpenZL `struct4+TransposeSplit` (`404.12 MiB`)**.
+  - **SmolLM2-135M BF16 (`real_smollm2_bf16.safetensors`, 256.6 MiB)**: **`170.44 MiB`** (**−15.09%** vs. `zstd -3 --long=27`, **−33.58%** vs. raw) at **208 MB/s** encode and **927–936 MB/s** decode — beating verified lossless **ZipNN 0.5.4 `bfloat16` (`171.10 MiB`)**, **Blosc2 (`177.25 MiB`)**, **OpenZL `BFloat16Deconstruct` (`178.68 MiB`)**, and **OpenZL `le16` (`183.00 MiB`)**.
+- **Real scientific astronomy rasters (`real_hubble_eagle_f32.fits`, NASA/ESA Hubble WFPC2 `>f4`)**: **`15.28 MiB`** (**−16.86%** vs. `zstd -19 --long=27`, within `0.14 MiB` of supervised OpenZL `15.14 MiB`) at **146 MB/s** encode and **680 MB/s** decode.
+- **Zero-regression safety floor**: Worst-case overhead across all 5 negative & adversarial controls (1 GB / `953.7 MiB` `enwik9`, source `.tar`, 1,834 concatenated ARM64 Mach-O binaries, compressed media, CSPRNG random) is **`+0.0021%` (L3) / `+0.0028%` (L19)** — over 50× below the `0.15%` cap.
+- **Strictly monotonic, bounded, and hardened**: `L19 ≤ L3` on **16/16** datasets, **`32/32` streaming SHA-256 PASS**, **`0.89×` avg / `2.06×` max** Scoring Work Multiplier (`≤ 3.0×` budget), **`680–1,414 MB/s`** single-core decode, **`O(1)`** bounded zstd window memory (`≤ 192 MiB` combined dual-stream zstd window ceiling; peak OS process RSS `≤ 286.8 MiB` decode / `≤ 312.9 MiB` encode including 16 MiB I/O staging and frame buffers), UBSan-verified bounds checks, and portable FIPS 180-4 SHA-256 fallback (`-DASV3_FORCE_PORTABLE_SHA256`).
+
+> **Units & Platform Scope**: In the **ASV4** section below, file sizes and OS Peak RSS use **binary `MiB` (`2^20 B`)** (matching [`v3/REPORT_V4.md`](v3/REPORT_V4.md)) while throughput is in decimal `MB/s` (`10^6 B/s`); in the **HND3** section, all sizes, RSS, and throughputs use **decimal `MB` (`10^6 B`)** (matching [`PHASE3_REPORT.md`](PHASE3_REPORT.md)). All benchmarks, UBSan runs, and 20,200-iteration `libc++` debug-hardened fuzzing were executed on **Apple Silicon ARM64**; portable scalar (`-DHND3_FORCE_SCALAR`) and portable SHA-256 (`-DASV3_FORCE_PORTABLE_SHA256`) paths are verified bit-exact on ARM64, while native Linux x86-64 CI round-trip and coverage-guided `libFuzzer` runs remain future work.
 
 ---
 
@@ -29,10 +31,10 @@ See **[`ARCHITECTURE.md`](ARCHITECTURE.md)** for full Mermaid diagrams of the tw
 
 ## Benchmark Results (16 Datasets / 4.95 GiB, Single-Threaded ARM64)
 
-### Head-to-Head on Real Public AI Weights & Astronomy Data
-*(All external baselines verified bit-exact lossless round-trip; aligned `.safetensors` baselines include exact header bytes. Note that ZipNN optimizes for multi-threaded model-loading throughput on aligned tensors, whereas ASV4 is a general-purpose, single-threaded, schema-free streaming compressor requiring no `.safetensors` parser.)*
+### Head-to-Head on Real Public AI Weights & Astronomy Data (Sizes in Binary `MiB`)
+*(All external baselines verified bit-exact lossless round-trip; aligned `.safetensors` baselines include exact header bytes. ZipNN optimizes for multi-threaded model-loading throughput on aligned tensors, whereas ASV4 is a general-purpose, single-threaded, schema-free streaming compressor requiring no `.safetensors` parser. OpenZL `le32` `398.43 MiB` reflects the verified chunk-33 fix documented in [`v3/REPORT_V4.md`](v3/REPORT_V4.md). On `real_gpt2_f32` and `real_smollm2_bf16`, L3 and L19 match because high-$H_0$ `T2_NIBROT` lanes cap `c_xform` to L3 to prevent `ZSTD_btultra2` noise-chasing regressions.)*
 
-| Real Public Dataset | Orig (MB) | `zstd -3` / `-19` (`libzstd 1.5.5` C API) | `Blosc2` (`zstd7`) | `OpenZL 0.3.0` *(Verified Round-Trip)* | `ZipNN 0.5.4` *(Aligned, Verified)* | **Blind `ASV4 v4.1` (L3 / L19)** |
+| Real Public Dataset | Orig (`MiB`) | `zstd -3` / `-19` (`libzstd 1.5.5` C API) | `Blosc2` (`zstd7`) | `OpenZL 0.3.0` *(Verified Round-Trip)* | `ZipNN 0.5.4` *(Aligned, Verified)* | **Blind `ASV4 v4.1` (L3 / L19)** |
 |---|---:|---:|---:|---:|---:|---:|
 | `real_gpt2_f32.safetensors` | 522.7 | 440.52 / 440.63 | 401.61 (`−8.86%`) | 398.43 (`le32`, `−9.58%`) / 402.50 (`f32Decon` aligned) / 404.12 (`tr4`) / 432.17 (`f32Decon` raw) | 397.59 (`float32`, `−9.77%`) | **394.91 (`−10.35%`) / 394.91 (`−10.38%`)** |
 | `real_smollm2_bf16.safetensors` | 256.6 | 200.74 / 200.67 | 177.25 (`−11.67%`) | 178.68 (`bf16Decon`, `−10.96%`) / 183.00 (`le16`, `−8.81%`) | 171.10 (`bfloat16`, `−14.74%`) | **170.44 (`−15.09%`) / 170.44 (`−15.06%`)** |
@@ -42,25 +44,26 @@ See **[`ARCHITECTURE.md`](ARCHITECTURE.md)** for full Mermaid diagrams of the tw
 | `real_nyc_taxi_columnar.arrow` | 803.1 | 107.72 / **87.83** | 148.84 | 112.47 (`serial`) | — | **107.72 (`+0.001%`) / 87.83 (`+0.002%`)** |
 
 ### Full 16-Dataset Same-Binary Table ([`v3/final_refresh_results_v4.1.csv`](v3/final_refresh_results_v4.1.csv))
+*(Sizes and Process RSS in binary `MiB`; speeds in decimal `MB/s`. For reference `B2_capi` `zstd -3` baseline speeds per dataset, see [`v3/REPORT_V4.md`](v3/REPORT_V4.md).)*
 
-| Dataset | Orig MB | L3 vs `B2_capi` | L19 vs `B3a_capi` | Enc L3 (MB/s) | Dec L3 / L19 (MB/s) | Dec L3 RSS (MB) | Regs | Work Mult | SHA-256 |
+| Dataset | Orig `MiB` | L3 vs `B2_capi` | L19 vs `B3a_capi` | Enc L3 (MB/s) | Dec L3 / L19 (MB/s) | Enc / Dec L3 RSS (`MiB`) | Regs | Work Mult | SHA-256 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| `real_gpt2_f32.safetensors` | 522.7 | **−10.354%** | **−10.375%** | 211.0 | 1251.5 / 1240.9 | 154.3 | 2 | 0.95× | PASS |
-| `real_smollm2_bf16.safetensors` | 256.6 | **−15.094%** | **−15.063%** | 208.3 | 926.6 / 935.6 | 150.8 | 3 | 0.85× | PASS |
-| `real_hubble_eagle_f32.fits` | 29.5 | **−16.658%** | **−16.860%** | 146.3 | 680.4 / 636.3 | 89.6 | 3 | 1.04× | PASS |
-| `real_mixed_public.bin` | 283.9 | **−5.401%** | **−5.920%** | 115.8 | 848.9 / 942.3 | 225.1 | 9 | 0.93× | PASS |
-| `real_nyc_taxi_struct104.bin` | 256.0 | +0.001% | +0.002% | 112.5 | 715.0 / 985.7 | 194.6 | 1 | 0.62× | PASS |
-| `real_nyc_taxi_columnar.arrow` | 803.1 | +0.001% | +0.002% | 118.5 | 986.4 / 1231.3 | 193.7 | 1 | 1.18× | PASS |
-| `target_numeric_f32.bin` | 256.0 | **−41.758%** | **−33.479%** | 157.8 | 847.1 / 732.5 | 202.2 | 1 | 1.29× | PASS |
-| `target_struct64.bin` | 256.0 | **−68.167%** | **−54.072%** | 179.7 | 695.7 / 691.5 | 198.1 | 1 | 0.78× | PASS |
-| `target_sqlite.db` | 311.3 | **−9.566%** | **−6.554%** | 89.8 | 737.3 / 632.8 | 286.0 | 2 | 1.00× | PASS |
-| `target_mixed_structured.bin` | 256.0 | **−42.944%** | **−32.186%** | 132.6 | 825.1 / 718.9 | 286.8 | 8 | 1.08× | PASS |
-| `target_snapshots.bin` | 256.0 | +0.001% | +0.001% | 343.0 | 1364.3 / 1414.0 | 207.0 | 1 | 0.25× | PASS |
-| `neg_enwik9.xml` (1 GB) | 953.7 | **+0.001%** | **+0.001%** | 108.4 | 779.0 / 781.0 | 196.8 | 1 | 0.73× | PASS |
-| `neg_source_tar.tar` | 273.2 | **+0.002%** | **+0.002%** | 111.3 | 1040.9 / 1051.1 | 193.6 | 1 | 0.97× | PASS |
-| `adv_binaries.bin` | 160.0 | **+0.002%** | **+0.003%** | 81.8 | 1136.5 / 1123.4 | 193.9 | 1 | 2.06× | PASS |
-| `adv_compressed_media.tar` | 126.0 | **+0.000%** | **+0.000%** | 299.1 | 1332.3 / 1281.9 | 211.0 | 1 | 0.33× | PASS |
-| `adv_random.bin` | 64.0 | **+0.000%** | **+0.000%** | 374.4 | 1128.7 / 1112.0 | 142.8 | 1 | 0.25× | PASS |
+| `real_gpt2_f32.safetensors` | 522.7 | **−10.354%** | **−10.375%** | 211.0 | 1251.5 / 1240.9 | 154.2 / 154.3 | 2 | 0.95× | PASS |
+| `real_smollm2_bf16.safetensors` | 256.6 | **−15.094%** | **−15.063%** | 208.3 | 926.6 / 935.6 | 151.8 / 150.8 | 3 | 0.85× | PASS |
+| `real_hubble_eagle_f32.fits` | 29.5 | **−16.658%** | **−16.860%** | 146.3 | 680.4 / 636.3 | 111.8 / 89.6 | 3 | 1.04× | PASS |
+| `real_mixed_public.bin` | 283.9 | **−5.401%** | **−5.920%** | 115.8 | 848.9 / 942.3 | 241.0 / 225.1 | 9 | 0.93× | PASS |
+| `real_nyc_taxi_struct104.bin` | 256.0 | +0.001% | +0.002% | 112.5 | 715.0 / 985.7 | 191.0 / 194.6 | 1 | 0.62× | PASS |
+| `real_nyc_taxi_columnar.arrow` | 803.1 | +0.001% | +0.002% | 118.5 | 986.4 / 1231.3 | 192.8 / 193.7 | 1 | 1.18× | PASS |
+| `target_numeric_f32.bin` | 256.0 | **−41.758%** | **−33.479%** | 157.8 | 847.1 / 732.5 | 202.4 / 202.2 | 1 | 1.29× | PASS |
+| `target_struct64.bin` | 256.0 | **−68.167%** | **−54.072%** | 179.7 | 695.7 / 691.5 | 194.8 / 198.1 | 1 | 0.78× | PASS |
+| `target_sqlite.db` | 311.3 | **−9.566%** | **−6.554%** | 89.8 | 737.3 / 632.8 | 282.6 / 286.0 | 2 | 1.00× | PASS |
+| `target_mixed_structured.bin` | 256.0 | **−42.944%** | **−32.186%** | 132.6 | 825.1 / 718.9 | 312.9 / 286.8 | 8 | 1.08× | PASS |
+| `target_snapshots.bin` | 256.0 | +0.001% | +0.001% | 343.0 | 1364.3 / 1414.0 | 215.0 / 207.0 | 1 | 0.25× | PASS |
+| `neg_enwik9.xml` (1 GB) | 953.7 | **+0.001%** | **+0.001%** | 108.4 | 779.0 / 781.0 | 197.4 / 196.8 | 1 | 0.73× | PASS |
+| `neg_source_tar.tar` | 273.2 | **+0.002%** | **+0.002%** | 111.3 | 1040.9 / 1051.1 | 191.6 / 193.6 | 1 | 0.97× | PASS |
+| `adv_binaries.bin` | 160.0 | **+0.002%** | **+0.003%** | 81.8 | 1136.5 / 1123.4 | 191.0 / 193.9 | 1 | 2.06× | PASS |
+| `adv_compressed_media.tar` | 126.0 | **+0.000%** | **+0.000%** | 299.1 | 1332.3 / 1281.9 | 213.0 / 211.0 | 1 | 0.33× | PASS |
+| `adv_random.bin` | 64.0 | **+0.000%** | **+0.000%** | 374.4 | 1128.7 / 1112.0 | 150.5 / 142.8 | 1 | 0.25× | PASS |
 
 ---
 
@@ -79,37 +82,22 @@ In addition to ASV4's 1D/record streaming engine, this repository includes **HND
 
 See **[`PHASE3_REPORT.md`](PHASE3_REPORT.md)** for full 7-layer R-D tables (`k=6..0` bytes, `PSNR`, $L_\infty$, decode ms), `CCSDS-123 + 3D-rANS` / `CharLS JPEG-LS` / `ZFP` / `zstd -19` baselines, `265.67 MB` real `int32` overflow-safe results, non-hyperspectral 3D microscopy & MRI controls (including honest domain boundaries), Peak RSS measurements, NEON↔scalar SHA-256 parity, and 20,200-iteration UBSan + `libc++` debug fuzzing.
 
-```bash
-# Build all C++20 binaries (./asv4, ./hnd2, ./hnd3) and run UBSan + cross-language verification
-make
-make test
-
-# Encode & decode a 3D hyperspectral cube (7-layer quality-embedded lossless .hnd3)
-./hnd3 enc cube.raw cube.hnd3 --shape 204,512,217 --dtype i16 --base-k 6
-./hnd3 dec cube.hnd3 cube_lossless.raw              # Full bit-exact decode + SHA-256 check
-./hnd3 dec cube.hnd3 preview.raw --stop-layer 6     # Instant 60 dB base preview (~348 MB/s)
-
-# Pure C++20 blind mode (zero shape hints, automatic BSQ/BIL/BIP stride & spectral-axis discovery)
-./hnd3 enc headerless.raw blind.hnd3 --blind --dtype u16 --base-k 0
-./hnd3 dec blind.hnd3 restored.raw
-```
-
 ---
 
 ## Quickstart
 
-### Build (macOS Apple Silicon or Linux x86-64/ARM64)
-Requires a C++20 compiler (`clang++` or `g++`) and `libzstd` (`>= 1.5`). The top-level [`Makefile`](Makefile) auto-detects Homebrew, Conda, or system `libzstd` paths and builds `./asv4` (from [`v3/cpp/asv3.cpp`](v3/cpp/asv3.cpp), which retains the `v3/` directory for historical continuity).
+### Build & Test (C++20; Verified on Apple Silicon ARM64, Portable Scalar Paths Included)
+Requires a C++20 compiler (`clang++` or `g++`) and `libzstd` (`>= 1.5` for `./asv4`; `./hnd2` and `./hnd3` have **zero external dependencies**). The top-level [`Makefile`](Makefile) auto-detects Homebrew, Conda, or system `libzstd` paths and builds `./asv4` (from [`v3/cpp/asv3.cpp`](v3/cpp/asv3.cpp)), `./hnd2`, and `./hnd3`.
 
 ```bash
-# Build ./asv4 (and v3/cpp/asv3)
+# Build all C++20 binaries (./asv4, v3/cpp/asv3, ./hnd2, ./hnd3)
 make
 
-# Run UBSan + portable FIPS 180-4 SHA-256 + Unix pipe smoke test
+# Run UBSan + portable SHA-256 + NEON/scalar parity + 2,000-iter libc++ debug fuzz + Py↔C++ interop tests
 make test
 ```
 
-### Usage (Files or Unix Pipes)
+### Usage: ASV4 (Files or Unix Pipes)
 ```bash
 # Compress & decompress files (automatic streaming SHA-256 verification on decode)
 ./asv4 c --level 3 model.safetensors model.asv4
@@ -120,6 +108,18 @@ cat model.safetensors | ./asv4 c --level 3 | ./asv4 d > /dev/null
 
 # Archival preset (--level 19, guaranteed <= --level 3) with JSON stats & trace
 ./asv4 c --level 19 --stats stats.json --trace input.bin output.asv4
+```
+
+### Usage: HND3 (3D Hyperspectral & Scientific Tensors)
+```bash
+# Encode & decode a 3D hyperspectral cube (7-layer quality-embedded lossless .hnd3)
+./hnd3 enc cube.raw cube.hnd3 --shape 204,512,217 --dtype i16 --base-k 6
+./hnd3 dec cube.hnd3 cube_lossless.raw              # Full bit-exact decode + SHA-256 check
+./hnd3 dec cube.hnd3 preview.raw --stop-layer 6     # Instant 60.1 dB base preview (3.4% of stream, ~328 MB/s)
+
+# Pure C++20 blind mode (zero shape hints, automatic 6/6 stride & spectral-axis discovery)
+./hnd3 enc headerless.raw blind.hnd3 --blind --dtype i16 --base-k 0
+./hnd3 dec blind.hnd3 restored.raw
 ```
 
 ### Reproduce All 16 Benchmarks (4.95 GiB)

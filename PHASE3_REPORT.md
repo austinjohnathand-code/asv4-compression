@@ -99,6 +99,20 @@ Every codec below ran on the **exact same uncropped files** (no `//8` crops).
 
 > **Apples-to-Apples Takeaway**: Across **all 4 uncropped hyperspectral cubes** (including the frozen 132.84 MB AVIRIS holdout), **7-layer progressive `.hnd3` (`k=6`) beats OpenJPEG JPEG-2000 Part 2 + `LDU`-RKLT by `0.13–0.29 b/s` (`4.1×–5.5×` faster decode) AND beats CCSDS-123.0-B-1 (`P=3` & `P=15`) by `0.14–0.49 b/s`**. On Salinas and PaviaU it is **#1 overall** even against non-progressive `CCSDS-123 (P=15) + 3D-rANS` (by `0.17–0.21 b/s`), while on Indian Pines and AVIRIS non-progressive `CCSDS-123 + 3D-rANS` edges ahead by `0.05–0.18 b/s` at `7–8×` slower sequential speed and with no progressive previews.
 
+### 2.5 Empirical Rounding-Noise Variance Audit (`204×204` / `224×224` Complete-Pivoted `LDU`-RKLT)
+
+Phase 0's row-pivoted `PLUS`/SERM factorization suffered Schur-complement multiplier blowup (`> 10^4`) beyond `M = 8`. Complete-pivoted `LDU` (`P·diag(s0)·U_KLT·Q = L·diag(sd)·D_ladder·U`) guarantees `|L_ij|, |U_ij| ≤ 1.0000` and pairs diagonal factors via a greedy log-balanced ladder (`0` Givens fallbacks up to `224×224`). Measuring exact same-matrix integer lifting error `e = Y_ldu − U_KLT·(X − μ)` against ideal non-reversible `float64` KLT (all verified bit-exact inverse round-trip):
+
+| Cube / Stress Test | Matrix `B×B` | `max|L|` | `max|U|` | `max|c_k|` | `max|1/c_k|` | `RMS(e)` | `Var(e)` | Tail-20% `RMS` | `max|e|` | `ΔH` vs `float64` KLT |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **Indian Pines** | `200×200` | `1.0000` | `1.0000` | `1.533` | `1.420` | `1.054` | `1.111` | `0.972` | `8.65` | `+0.0140 b/s` |
+| **Salinas** | `204×204` | `1.0000` | `1.0000` | `1.474` | `1.614` | `1.082` | `1.171` | `0.908` | `7.88` | `+0.0481 b/s` |
+| **PaviaU** | `103×103` | `1.0000` | `1.0000` | `2.037` | `2.317` | `1.345` | `1.809` | `1.440` | `12.53` | `+0.0213 b/s` |
+| **Unseen AVIRIS** | `224×224` | `1.0000` | `1.0000` | `1.671` | `1.604` | `0.970` | `0.941` | `0.701` | `9.66` | `+0.3967 b/s` |
+| **High-SNR Synth (`60 dB`, `σ_n=1`)** | `204×204` | `1.0000` | `1.0000` | `3.502` | `2.798` | `2.054` | `4.217` | `1.958` | `18.24` | `+0.9515 b/s` |
+
+- **Key mechanism & honest floor**: Complete pivoting eliminates catastrophic blowup completely (`Var(e) = 0.94–1.81` across all 4 real cubes, zero Givens fallbacks). On standard sensor noise floors (Indian Pines, Salinas, PaviaU), the rounding overhead is negligible (`+0.014–0.048 b/s`). On ultra-low-noise/high-SNR cubes whose tail PCs fall near or below `1` count (`AVIRIS` tail `σ < 1`, `60 dB` synthetic `σ_n = 1`), the irreducible $O(1)$-LSB integer-lifting rounding floor contributes `+0.40–0.95 b/s` relative to unquantized `float64` KLT—explaining cleanly why non-progressive causal `CCSDS-123 + 3D-rANS` edges `.hnd3` by `0.051 b/s` on `AVIRIS`.
+
 ---
 
 ## 3. Full 7-Layer Progressive Rate–Distortion Curves (`k = 6 → 0`)
