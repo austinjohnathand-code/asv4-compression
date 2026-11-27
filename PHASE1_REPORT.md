@@ -1,6 +1,6 @@
 # Phase 1 Report — End-to-End `.hnd1` Reversible Hyperspectral & N-D Codec
 
-This report documents the falsification experiments, architecture breakthroughs, and full native-resolution **real-binary `.hnd1`** benchmark results of **Phase 1** ([phase1_codec.py](file:///Users/destinatus/Documents/compression/phase1_codec.py), verified by [test_phase1.py](file:///Users/destinatus/Documents/compression/test_phase1.py)).
+This report documents the falsification experiments, architecture breakthroughs, and full native-resolution **real-binary `.hnd1`** benchmark results of **Phase 1** ([`phase1_codec.py`](phase1_codec.py), verified by [`test_phase1.py`](test_phase1.py)).
 
 ---
 

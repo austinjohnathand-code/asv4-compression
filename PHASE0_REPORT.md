@@ -1,6 +1,6 @@
 # Phase 0 Falsification Report — Real Hyperspectral Cubes & Blind N-D Stride Recovery
 
-This report documents the empirical results of the upgraded **Phase 0 Falsification Harness v2.2** ([phase0_harness.py](file:///Users/destinatus/Documents/compression/phase0_harness.py)) evaluated on **three full-resolution real public hyperspectral cubes** (`Indian Pines`, `Salinas`, `Pavia University`) plus **three synthetic mechanical controls** (`hyper`, `dem`, `noise`) and a **4D synthetic volume**.
+This report documents the empirical results of the upgraded **Phase 0 Falsification Harness v2.2** ([`phase0_harness.py`](phase0_harness.py)) evaluated on **three full-resolution real public hyperspectral cubes** (`Indian Pines`, `Salinas`, `Pavia University`) plus **three synthetic mechanical controls** (`hyper`, `dem`, `noise`) and a **4D synthetic volume**.
 
 ---
 
@@ -132,7 +132,7 @@ Selected rate–distortion points (`b/s` / `PSNR dB`, uniform deadzone step `q �
 
 ## 7. Automated Verification & Next Recommendations
 
-- Automated test suite: [test_phase0.py](file:///Users/destinatus/Documents/compression/test_phase0.py) (`14` unit & integration tests covering 5/3 lifting, all 7 spectral transforms, folded RKLT, deadzone step=1 losslessness, Blue Book CCSDS-123 round-trip, Rice normal+escape round-trip, BSQ/BIL/BIP loaders, DC-invariant ACF/constant guard, 4D + noise + synthetic + all 18 real hyperspectral cube permutations).
+- Automated test suite: [`test_phase0.py`](test_phase0.py) (`14` unit & integration tests covering 5/3 lifting, all 7 spectral transforms, folded RKLT, deadzone step=1 losslessness, Blue Book CCSDS-123 round-trip, Rice normal+escape round-trip, BSQ/BIL/BIP loaders, DC-invariant ACF/constant guard, 4D + noise + synthetic + all 18 real hyperspectral cube permutations).
 - **Recommended Phase 1 Architecture** (directly dictated by the Phase 0 gates):
   1. **Drop** folded global spatial KLT (`R4`) for lossless mode (Gate `0A` killed cleanly).
   2. **Ship Track A** (blind stride-lattice recovery + spectral-axis role picker) as the schema-free front-end — **48/48 exact**, `≤ +0.07%` vs. oracle on real 45 MB cubes.

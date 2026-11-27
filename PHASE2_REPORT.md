@@ -3,7 +3,7 @@
 Phase 2 delivers two major milestones on top of Phase 1 (`phase1-v1.0`):
 
 1. **Unified Single-Stream Quality-Embedded Format (`.hnd2`)**: Combines Phase 1's one-shot tightest lossless mode (`base_k = 0`) and a **7-layer $L_2$-aligned dyadic bitplane-embedded mode (`base_k = 6`)** inside one clean binary wire specification. Truncating a single lossless `.hnd2` file at any layer boundary `k ∈ {6..0}` immediately decodes full-resolution previews from **`52.9–60.1 dB`** (`15×–91×` prefix) all the way to **bit-exact lossless (`SHA-256 PASS`)**—costing only **`+0.47%` (`+0.022 b/s`)** on Salinas!
-2. **Zero-Dependency C++20 ARM64 NEON + Multi-Threaded Engine ([cpp/hnd2.cpp](file:///Users/destinatus/Documents/compression/cpp/hnd2.cpp) → `./hnd2`)**: Built-in FIPS 180-4 SHA-256, Cyclic Jacobi symmetric eigensolver, cache-blocked NEON `LDU`-RKLT, multi-threaded arbitrary-shape 2D 5/3 integer lifting, and parallel-level 3D-context 32-bit rANS + 360°-context bitplane refinement. **100% wire-compatible bit-for-bit with [phase2_codec.py](file:///Users/destinatus/Documents/compression/phase2_codec.py)**, zero compiler warnings (`-Wall -Wextra`), and **100% UBSan clean** (`-fsanitize=undefined -fno-sanitize-recover=all`).
+2. **Zero-Dependency C++20 ARM64 NEON + Multi-Threaded Engine ([`cpp/hnd2.cpp`](cpp/hnd2.cpp) → `./hnd2`)**: Built-in FIPS 180-4 SHA-256, Cyclic Jacobi symmetric eigensolver, cache-blocked NEON `LDU`-RKLT, multi-threaded arbitrary-shape 2D 5/3 integer lifting, and parallel-level 3D-context 32-bit rANS + 360°-context bitplane refinement. **100% wire-compatible bit-for-bit with [`phase2_codec.py`](phase2_codec.py)**, zero compiler warnings (`-Wall -Wextra`), and **100% UBSan clean** (`-fsanitize=undefined -fno-sanitize-recover=all`).
 
 ---
 
@@ -58,7 +58,7 @@ All lossless runs verified with built-in FIPS 180-4 **SHA-256 PASS** and exact b
 ## 4. Verification Summary & Phase 3 Candidates
 
 - **Compiler & UBSan**: `make hnd2` builds cleanly with zero warnings under `-O3 -std=c++20 -mcpu=native -Wall -Wextra`; UBSan (`-fsanitize=undefined -fno-sanitize-recover=all`) passed on full native `(200, 145, 145)` Indian Pines (`base_k = 0` & `base_k = 6`).
-- **Cross-Language Suite**: [test_phase2.py](file:///Users/destinatus/Documents/compression/test_phase2.py) (**4/4 PASS in 1.3s**):
+- **Cross-Language Suite**: [`test_phase2.py`](test_phase2.py) (**4/4 PASS in 1.3s**):
   - `Python encode → C++ decode` and `C++ encode → Python decode` across `i16`/`u16`/`i32`, odd shapes, `spec_axis ∈ {0, 1, 2}`, `base_k ∈ {0, 6}`, and byte-identical truncated `stop_layer = 3` reconstruction.
   - Blind Track A 1D (`BSQ`/`BIP` + noise raw fallback) encoded by Python and decoded by C++ `./hnd2`.
   - Full native odd `(200, 145, 145)` `Indian_pines.mat` C++ ↔ Python interop.

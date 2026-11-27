@@ -165,3 +165,33 @@ python3 v3/bench_final_refresh.py
 | [`v3/stage3_forest.py`](v3/stage3_forest.py) | Phase 1B Stage 3 delta-forest ablation (falsified & cut per Kill Gate 1B) |
 | [`v3/bench_final_refresh.py`](v3/bench_final_refresh.py) | Same-binary 16-dataset L3 & L19 wall-clock / Peak RSS benchmark driver |
 | [`ftcc/`](ftcc/) | Initial v1 forest-tree energy-clumping prototype (superseded by v3/v4) |
+| [`LICENSE`](LICENSE) | MIT License |
+
+---
+
+## References & Credits
+
+### Algorithms & Prior Art
+- **P. Hao & Q. Shi (2001)**, *Matrix Factorizations for Reversible Integer Mapping*, IEEE Trans. Signal Processing (`PLUS` / SERM integer lifting).
+- **I. Daubechies & W. Sweldens (1998)**, *Factoring Wavelet Transforms into Lifting Steps*, J. Fourier Anal. Appl. (3-shear diagonal lifting & lifting framework).
+- **A. R. Calderbank, I. Daubechies, W. Sweldens, & B.-L. Yeo (1998)**, *Wavelet Transforms That Map Integers to Integers*, Appl. Comput. Harmon. Anal. (reversible 5/3 integer wavelet).
+- **L. Galli & S. Salzo (2004)**, *Lossless Hyperspectral Compression Using KLT*, IEEE IGARSS (reversible KLT for hyperspectral imagery).
+- **I. Blanes & J. Serra-Sagristà (2010)**, *Pairwise Orthogonal Transform for Spectral Image Coding*, IEEE Trans. Geosci. Remote Sens. (POT spectral decorrelation).
+- **J. Duda (2009 / 2013)**, *Asymmetric Numeral Systems*, arXiv:0902.0271 / arXiv:1311.2540 (32-bit rANS entropy coding).
+- **A. de Cheveigné & H. Kawahara (2002)**, *YIN, a Fundamental Frequency Estimator for Speech and Music*, J. Acoust. Soc. Am. (rectified fundamental stride selection).
+- **CCSDS 123.0-B-1 / 123.0-B-2**, *Low-Complexity Lossless and Near-Lossless Multispectral and Hyperspectral Image Compression*, Consultative Committee for Space Data Systems.
+- **External reference implementations benchmarked**: `libzstd` (Meta), `OpenZL`, `Blosc2`, `ZipNN`, `OpenJPEG`, `CharLS`, and `ZFP` (via `imagecodecs`).
+
+### Public Datasets
+- **Hyperspectral cubes**: Purdue University / NASA AVIRIS *Indian Pines*, NASA/JPL AVIRIS *Salinas*, University of Pavia ROSIS *Pavia University*, and NASA AVIRIS holdout scene via HuggingFace `danjacobellis/aviris_1k_val`.
+- **Non-hyperspectral 3D controls**: `scikit-image` public 3D fluorescence microscopy (`cells3d.tif`, Allen Institute for Cell Science) and 3D medical brain MRI (`brain.tiff`).
+- **ASV4 streaming corpus**: OpenAI `gpt2` (`safetensors`), HuggingFaceTB `SmolLM2-135M` (`safetensors`), NASA/ESA Hubble WFPC2 Eagle Nebula (`FITS`), NYC TLC Trip Record Data, and Matt Mahoney's `enwik9`.
+
+### Authorship & AI-Assisted Engineering Note
+This codebase, staged falsification harnesses, C++20 NEON kernels, and empirical audit reports were developed collaboratively with AI-assisted implementation, code review, and independent adversarial verification.
+
+---
+
+## License
+
+Released under the **MIT License** — see [`LICENSE`](LICENSE).
