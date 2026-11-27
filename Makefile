@@ -20,12 +20,15 @@ ZSTD_PREFIX := $(shell \
 CXXFLAGS := -O3 -std=c++20 $(ARCH_FLAGS) -Wall -Wextra -I$(ZSTD_PREFIX)/include
 LDFLAGS  := -L$(ZSTD_PREFIX)/lib -Wl,-rpath,$(ZSTD_PREFIX)/lib -lzstd
 
-.PHONY: all bench test clean
+.PHONY: all hnd2 bench test clean
 
-all: asv4 v3/cpp/asv3
+all: asv4 v3/cpp/asv3 hnd2
 
 asv4: v3/cpp/asv3.cpp
 	$(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
+
+hnd2: cpp/hnd2.cpp
+	$(CXX) -O3 -std=c++20 $(ARCH_FLAGS) -Wall -Wextra -pthread $< -o $@
 
 v3/cpp/asv3: asv4
 	cp asv4 v3/cpp/asv3
@@ -41,7 +44,11 @@ test:
 	  -DASV3_FORCE_PORTABLE_SHA256 -I$(ZSTD_PREFIX)/include v3/cpp/asv3.cpp -o /tmp/asv4_test $(LDFLAGS)
 	head -c 262144 v3/cpp/asv3.cpp | /tmp/asv4_test c --level 3 | /tmp/asv4_test d > /dev/null
 	rm -f /tmp/asv4_test
-	@echo "[PASS] UBSan + portable SHA-256 + pipe smoke test succeeded"
+	$(CXX) -O2 -std=c++20 -Wall -Wextra -fsanitize=undefined -fno-sanitize-recover=all -pthread \
+	  cpp/hnd2.cpp -o /tmp/hnd2_test
+	python3 -m unittest -v test_phase2.py
+	rm -f /tmp/hnd2_test
+	@echo "[PASS] UBSan + portable SHA-256 + HND2 Python/C++ cross-verification succeeded"
 
 clean:
-	rm -f asv4 v3/cpp/asv3 v3/cpp/zstd_capi_bench /tmp/asv4_test
+	rm -f asv4 hnd2 v3/cpp/asv3 v3/cpp/zstd_capi_bench /tmp/asv4_test /tmp/hnd2_test
