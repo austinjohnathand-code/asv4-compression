@@ -64,19 +64,20 @@ See **[`ARCHITECTURE.md`](ARCHITECTURE.md)** for full Mermaid diagrams of the tw
 
 ---
 
-## HND3 — Reversible N-D Hyperspectral & Scientific Tensor Engine (`phase3-v3.0`)
+## HND3 — Reversible N-D Hyperspectral & Scientific Tensor Engine (`phase3-v3.1`)
 
-In addition to ASV4's 1D/record streaming engine, this repository includes **HND3** ([`cpp/hnd3.cpp`](cpp/hnd3.cpp) → `./hnd3`, wire-compatible with [`phase3_codec.py`](phase3_codec.py)), a **zero-dependency C++20 ARM64 NEON** reversible 3D/N-D tensor codec featuring complete-pivoted `LDU`-RKLT (`vmlal_s32` FMA), arbitrary-shape 2D 5/3 integer lifting, **16-stripe parallel 3D-context 32-bit rANS**, **single-stream 7-layer quality-embedded lossless coding**, built-in FIPS 180-4 SHA-256, and **native C++20 blind stride-lattice recovery (`--blind`)**.
+In addition to ASV4's 1D/record streaming engine, this repository includes **HND3** ([`cpp/hnd3.cpp`](cpp/hnd3.cpp) → `./hnd3`, wire-compatible with [`phase3_codec.py`](phase3_codec.py)), a **zero-dependency C++20 ARM64 NEON** reversible 3D/N-D tensor codec featuring complete-pivoted `LDU`-RKLT (`vmlal_s32` FMA with bit-exact `-DHND3_FORCE_SCALAR` parity), arbitrary-shape 2D 5/3 integer lifting, **16-stripe parallel 3D-context 32-bit rANS**, **single-stream 7-layer quality-embedded lossless coding**, built-in FIPS 180-4 SHA-256, and **windowed native C++20 blind stride-lattice recovery (`--blind`)**.
 
-### Real Public Hyperspectral Cubes (Full Native Uncropped Dimensions, All `SHA-256 PASS`)
+### Real Public Hyperspectral Cubes (Exact Uncropped Apples-to-Apples, Decimal `MB = 10⁶ B`, All `SHA-256 PASS`)
 
-| Native Real Cube | Std CCSDS-123 Blue Book (`Rice`) | **`.hnd3` One-Shot (`k=0`)** | **`.hnd3` 7-Layer Embedded (`k=6`)** | Base Layer `k=6` Preview (Same File!) | Pure C++ `--blind` (BSQ/BIL/BIP) |
-|---|---:|---:|---:|---:|---:|
-| **Indian Pines** `(200, 145, 145)`, `8.41 MB` | `6.734 b/s` (`2.38×`) | `6.485 b/s` (`196.8 MB/s` dec) | **`6.561 b/s` (`2.44×`)** (`120.7 MB/s` dec) | `1.09 b/s` → **`54.07 dB`** (`564.9 MB/s`) | `3/3` exact (`6.485 b/s`) |
-| **Salinas** `(204, 512, 217)`, `45.33 MB` | `5.094 b/s` (`3.14×`) | `4.657–4.691 b/s` (`220.4 MB/s` dec) | **`4.628 b/s` (`3.46×`, `+9.1%` vs CCSDS)** | `0.18 b/s` (`91×`) → **`60.11 dB`** (`347.8 MB/s`) | `3/3` exact (`5.988 b/s`* ) |
-| **PaviaU** `(103, 610, 340)`, `42.72 MB` | `6.839 b/s` (`2.34×`) | `6.367–6.547 b/s` (`207.5 MB/s` dec) | **`6.354 b/s` (`2.52×`, `+7.1%` vs CCSDS)** | `0.88 b/s` (`18×`) → **`52.89 dB`** (`483.6 MB/s`) | `3/3` true `B` (`6.550 b/s`* ) |
+| Uncropped Real Cube | Custom CCSDS-123.0-B-1 (`P=3 / P=15`) | Official `OpenJPEG J2K + LDU-RKLT` | **`.hnd3` One-Shot (`k=0`)** | **`.hnd3` 7-Layer (`k=6`)** | `k=6` Preview (Same File!) | Full Uncropped `--blind` (`6/6` Perms) |
+|---|---:|---:|---:|---:|---:|---:|
+| **Indian Pines** `(200, 145, 145)`, `8.41 MB` | `6.798 / 6.772 b/s` | `6.739 b/s` (`22 MB/s` dec) | `6.485 b/s` (`196 MB/s` dec) | **`6.561 b/s` (`2.44×`)** (`122 MB/s`) | `16.4%` (`1.07 b/s`) → **`54.1 dB`** (`530 MB/s`) | **`6/6` exact** (`6.485 b/s`) |
+| **Salinas** `(204, 512, 217)`, `45.33 MB` | `5.131 / 5.108 b/s` | `4.803 b/s` (`21 MB/s` dec) | `4.657 b/s` (`157 MB/s` dec) | **`4.628 b/s` (`3.46×`)** (`111 MB/s`) | **`3.4%` (`0.16 b/s`, `100×`)** → **`60.1 dB`** (`328 MB/s`) | **`6/6` exact** (`4.654–4.657 b/s`) |
+| **PaviaU** `(103, 610, 340)`, `42.72 MB` | `6.846 / 6.907 b/s` | `6.640 b/s` (`21 MB/s` dec) | `6.367 b/s` (`186 MB/s` dec) | **`6.354 b/s` (`2.52×`)** (`122 MB/s`) | `12.1%` (`0.77 b/s`, `21×`) → **`52.9 dB`** (`407 MB/s`) | **`6/6` exact** (`6.349–6.367 b/s`) |
+| **Unseen AVIRIS** `(224, 745, 398)`, `132.84 MB` | `3.112 / 3.078 b/s` | `3.068 b/s` (`27 MB/s` dec) | `3.068 b/s` (`159 MB/s` dec) | **`2.940 b/s` (`5.44×`)** (`117 MB/s`) | **`0.6%` (`0.02 b/s`, `888×`)** → **`55.3 dB`** (`318 MB/s`) | **`6/6` exact** (`3.068–3.113 b/s`) |
 
-*\*Blind C++20 BSQ/BIL/BIP timing test run on `(64, 256, 216)` subcubes for Salinas/PaviaU and full native `(200, 145, 145)` for Indian Pines; incompressible noise falls back cleanly to `[1]` raw framing (`< +0.2%` tax).*
+See **[`PHASE3_REPORT.md`](PHASE3_REPORT.md)** for full 7-layer R-D tables (`k=6..0` bytes, `PSNR`, $L_\infty$, decode ms), `CCSDS-123 + 3D-rANS` / `CharLS JPEG-LS` / `ZFP` / `zstd -19` baselines, `265.67 MB` real `int32` overflow-safe results, non-hyperspectral 3D microscopy & MRI controls (including honest domain boundaries), Peak RSS measurements, NEON↔scalar SHA-256 parity, and 20,200-iteration UBSan + `libc++` debug fuzzing.
 
 ```bash
 # Build all C++20 binaries (./asv4, ./hnd2, ./hnd3) and run UBSan + cross-language verification

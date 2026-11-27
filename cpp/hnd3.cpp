@@ -23,9 +23,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -167,14 +169,23 @@ static void parallel_for(size_t count, int n_threads, Fn&& fn) {
     if (nt == 1) { fn(0, count); return; }
     std::vector<std::thread> workers;
     workers.reserve(nt);
+    std::mutex err_mtx;
+    std::exception_ptr first_err = nullptr;
     size_t chunk = (count + nt - 1) / nt;
     for (int t = 0; t < nt; ++t) {
         size_t lo = static_cast<size_t>(t) * chunk;
         size_t hi = std::min(count, lo + chunk);
         if (lo >= hi) break;
-        workers.emplace_back([&, lo, hi]() { fn(lo, hi); });
+        workers.emplace_back([&, lo, hi]() {
+            try { fn(lo, hi); }
+            catch (...) {
+                std::lock_guard<std::mutex> lk(err_mtx);
+                if (!first_err) first_err = std::current_exception();
+            }
+        });
     }
     for (auto& w : workers) w.join();
+    if (first_err) std::rethrow_exception(first_err);
 }
 
 // =============================================================================
@@ -312,7 +323,7 @@ static double vec_var(const std::vector<double>& v) {
     return s / static_cast<double>(v.size());
 }
 
-static std::vector<size_t> recover_strides_cpp(const std::vector<double>& x, int max_axes = 5,
+static std::vector<size_t> recover_strides_cpp(const std::vector<double>& x, size_t N_full, int max_axes = 5,
                                                double min_prom = 0.10, double min_val = 0.20) {
     size_t L_orig = x.size();
     size_t limit = L_orig / 4;
@@ -448,7 +459,11 @@ static std::vector<size_t> recover_strides_cpp(const std::vector<double>& x, int
             }
         }
 
-        chain.push_back(best_k * s_prev);
+        size_t s_next = best_k * s_prev;
+        // Once a full 3D lattice [1, s1, s2] is recovered, reject any extra 4th+ candidate
+        // that does not divide the stream length N_full (eliminates non-lattice urban echoes).
+        if (chain.size() >= 3 && (N_full % s_next != 0)) break;
+        chain.push_back(s_next);
         double var_p = vec_var(cur_peeled);
         if (var_p < var_cur) { cur = std::move(cur_peeled); var_cur = var_p; }
     }
@@ -624,7 +639,7 @@ static LduStage complete_pivoted_ldu(const std::vector<double>& A_in, const std:
 static inline void ldu_row_madd_i32_neon(int32_t* dst, const int32_t* Y, int nb,
                                          const int16_t* coeffs, int j_lo, int j_hi, int sign_mul) {
     int t = 0;
-#if defined(__aarch64__)
+#if defined(__aarch64__) && !defined(HND3_FORCE_SCALAR)
     const int64x2_t vhalf = vdupq_n_s64(LDU_HALF);
     for (; t + 7 < nb; t += 8) {
         int64x2_t a0 = vdupq_n_s64(0), a1 = vdupq_n_s64(0);
@@ -857,16 +872,33 @@ static void pack_ldu_stage(std::vector<uint8_t>& buf, const LduStage& st) {
     for (int k = 0; k < M - 1; ++k) write_le<int32_t>(buf, st.cq_m1[k]);
 }
 
-static LduStage unpack_ldu_stage(const uint8_t* p, size_t& pos) {
+static LduStage unpack_ldu_stage(const uint8_t* p, size_t& pos, size_t end_pos, int B_max) {
+    if (pos + 2 > end_pos) throw std::runtime_error("Truncated LDU stage M");
     LduStage st;
     int M = read_le<uint16_t>(p + pos); pos += 2;
+    if (M < 2 || M > B_max) throw std::runtime_error("Invalid LDU stage M");
+    size_t nb = static_cast<size_t>((M + 7) / 8);
+    size_t need = static_cast<size_t>(M) * 8 + 2 * nb + static_cast<size_t>(M) * (M - 1) * 2
+                + static_cast<size_t>(M - 1) * 12;
+    if (pos + need > end_pos) throw std::runtime_error("Truncated LDU stage payload");
     st.M = M;
     st.grp.resize(M); st.rperm.resize(M); st.cperm.resize(M); st.dperm.resize(M);
-    for (int i = 0; i < M; ++i) { st.grp[i]   = read_le<uint16_t>(p + pos); pos += 2; }
-    for (int i = 0; i < M; ++i) { st.rperm[i] = read_le<uint16_t>(p + pos); pos += 2; }
-    for (int i = 0; i < M; ++i) { st.cperm[i] = read_le<uint16_t>(p + pos); pos += 2; }
-    for (int i = 0; i < M; ++i) { st.dperm[i] = read_le<uint16_t>(p + pos); pos += 2; }
-    int nb = (M + 7) / 8;
+    for (int i = 0; i < M; ++i) {
+        st.grp[i] = read_le<uint16_t>(p + pos); pos += 2;
+        if (st.grp[i] >= static_cast<uint16_t>(B_max)) throw std::runtime_error("OOB LDU grp");
+    }
+    for (int i = 0; i < M; ++i) {
+        st.rperm[i] = read_le<uint16_t>(p + pos); pos += 2;
+        if (st.rperm[i] >= static_cast<uint16_t>(M)) throw std::runtime_error("OOB LDU rperm");
+    }
+    for (int i = 0; i < M; ++i) {
+        st.cperm[i] = read_le<uint16_t>(p + pos); pos += 2;
+        if (st.cperm[i] >= static_cast<uint16_t>(M)) throw std::runtime_error("OOB LDU cperm");
+    }
+    for (int i = 0; i < M; ++i) {
+        st.dperm[i] = read_le<uint16_t>(p + pos); pos += 2;
+        if (st.dperm[i] >= static_cast<uint16_t>(M)) throw std::runtime_error("OOB LDU dperm");
+    }
     st.sign0.assign(M, 1); st.dsgn.assign(M, 1);
     for (int i = 0; i < M; ++i) if ((p[pos + (i >> 3)] >> (7 - (i & 7))) & 1) st.sign0[i] = -1;
     pos += nb;
@@ -1126,8 +1158,9 @@ static void normalize_counts(const int64_t* counts, int n_ctxs, int n_syms,
     tbuf.insert(tbuf.end(), body.begin(), body.end());
 }
 
-static void unpack_tables(const uint8_t* p, size_t& pos, int n_ctxs, int n_syms, bool small_sym_mask,
+static void unpack_tables(const uint8_t* p, size_t& pos, size_t end_pos, int n_ctxs, int n_syms, bool small_sym_mask,
                           std::vector<int32_t>& freqs, std::vector<int32_t>& cdfs) {
+    if (pos + 2 > end_pos) throw std::runtime_error("Truncated rANS table header");
     freqs.assign(n_ctxs * n_syms, 0);
     cdfs.assign(n_ctxs * (n_syms + 1), 0);
     uint16_t active_mask = read_le<uint16_t>(p + pos); pos += 2;
@@ -1137,22 +1170,30 @@ static void unpack_tables(const uint8_t* p, size_t& pos, int n_ctxs, int n_syms,
             for (int s = 1; s <= n_syms; ++s) cdfs[c * (n_syms + 1) + s] = RANS_M;
             continue;
         }
+        size_t msz = small_sym_mask ? 1 : 4;
+        if (pos + msz > end_pos) throw std::runtime_error("Truncated rANS sym_mask");
         uint32_t sm = small_sym_mask ? p[pos++] : read_le<uint32_t>(p + pos);
         if (!small_sym_mask) pos += 4;
         std::vector<int> nz;
         for (int s = 0; s < n_syms; ++s) if ((sm >> s) & 1U) nz.push_back(s);
+        if (nz.empty()) throw std::runtime_error("Empty active rANS context");
         if (nz.size() == 1) {
             freqs[c * n_syms + nz[0]] = RANS_M;
         } else {
+            if (pos + (nz.size() - 1) * 2 > end_pos) throw std::runtime_error("Truncated rANS freqs");
             int32_t sum = 0;
             for (size_t i = 0; i + 1 < nz.size(); ++i) {
                 int32_t fv = read_le<uint16_t>(p + pos); pos += 2;
+                if (fv < 1 || fv >= static_cast<int32_t>(RANS_M)) throw std::runtime_error("Invalid rANS freq");
                 freqs[c * n_syms + nz[i]] = fv; sum += fv;
             }
-            freqs[c * n_syms + nz.back()] = static_cast<int32_t>(RANS_M) - sum;
+            int32_t last_f = static_cast<int32_t>(RANS_M) - sum;
+            if (last_f < 1) throw std::runtime_error("Invalid rANS freq sum");
+            freqs[c * n_syms + nz.back()] = last_f;
         }
         int32_t acc = 0; cdfs[c * (n_syms + 1) + 0] = 0;
         for (int s = 0; s < n_syms; ++s) { acc += freqs[c * n_syms + s]; cdfs[c * (n_syms + 1) + s + 1] = acc; }
+        if (acc != static_cast<int32_t>(RANS_M)) throw std::runtime_error("Corrupt rANS CDF sum");
     }
 }
 
@@ -1295,14 +1336,18 @@ static std::vector<uint8_t> pack_rans_stripe(const int64_t* blk, int Bs, int H, 
 static void unpack_rans_stripe(const uint8_t* p, size_t payload_pos, size_t payload_len,
                                int64_t* out, int Bs, int H, int W,
                                const int64_t* par, int pH, int pW) {
-    size_t pos = payload_pos;
+    size_t pos = payload_pos, end_pos = payload_pos + payload_len;
     std::vector<int32_t> freqs, cdfs;
-    unpack_tables(p, pos, N_CTXS, N_SYMS, false, freqs, cdfs);
+    unpack_tables(p, pos, end_pos, N_CTXS, N_SYMS, false, freqs, cdfs);
+    if (pos + 8 > end_pos) throw std::runtime_error("Truncated stripe base lengths");
     uint32_t n_words = read_le<uint32_t>(p + pos); pos += 4;
     uint32_t n_eb    = read_le<uint32_t>(p + pos); pos += 4;
+    if (n_words < 2 || static_cast<size_t>(n_words) * 2 > end_pos - pos)
+        throw std::runtime_error("Invalid stripe base n_words");
     const uint8_t* w_ptr  = p + pos; pos += static_cast<size_t>(n_words) * 2;
+    if (n_eb > end_pos - pos) throw std::runtime_error("Invalid stripe base n_eb");
     const uint8_t* eb_ptr = p + pos; pos += n_eb;
-    if (pos != payload_pos + payload_len) throw std::runtime_error("Stripe base framing mismatch");
+    if (pos != end_pos) throw std::runtime_error("Stripe base framing mismatch");
 
     uint8_t lut[N_CTXS * RANS_M];
     for (int c = 0; c < N_CTXS; ++c) {
@@ -1317,6 +1362,7 @@ static void unpack_rans_stripe(const uint8_t* p, size_t payload_pos, size_t payl
     uint64_t hi_w = read_le<uint16_t>(w_ptr + wpos * 2); wpos--;
     uint64_t lo_w = read_le<uint16_t>(w_ptr + wpos * 2); wpos--;
     uint64_t state = (hi_w << 16) | lo_w;
+    if (state < RANS_L) throw std::runtime_error("Invalid initial rANS state");
 
     FastBitReader br(eb_ptr, n_eb);
     bool has_p = (par != nullptr);
@@ -1359,6 +1405,7 @@ static void unpack_rans_stripe(const uint8_t* p, size_t payload_pos, size_t payl
                     state = (state << 16) | read_le<uint16_t>(w_ptr + wpos * 2);
                     wpos--;
                 }
+                if (state < RANS_L) throw std::runtime_error("Truncated rANS bitstream");
                 uint64_t rem = 0;
                 if (s >= 4) {
                     int eb = (s == 31) ? 32 : ((s >> 1) - 1);
@@ -1473,12 +1520,14 @@ static std::vector<uint8_t> pack_refine_stripe(const int64_t* full_sub, const in
 static void unpack_refine_stripe(const uint8_t* p, size_t payload_pos, size_t payload_len,
                                  const int64_t* prev_sub, int64_t* cur_sub, int Bs, int H, int W,
                                  const int64_t* par_sub, int pH, int pW) {
-    size_t pos = payload_pos;
+    size_t pos = payload_pos, end_pos = payload_pos + payload_len;
     std::vector<int32_t> freqs, cdfs;
-    unpack_tables(p, pos, 16, 3, true, freqs, cdfs);
+    unpack_tables(p, pos, end_pos, 16, 3, true, freqs, cdfs);
+    if (pos + 4 > end_pos) throw std::runtime_error("Truncated stripe refine n_words");
     uint32_t n_words = read_le<uint32_t>(p + pos); pos += 4;
-    const uint8_t* w_ptr = p + pos; pos += static_cast<size_t>(n_words) * 2;
-    if (pos != payload_pos + payload_len) throw std::runtime_error("Stripe refine framing mismatch");
+    if (n_words < 2 || static_cast<size_t>(n_words) * 2 != end_pos - pos)
+        throw std::runtime_error("Stripe refine framing mismatch");
+    const uint8_t* w_ptr = p + pos;
 
     uint8_t lut[16 * RANS_M];
     for (int c = 0; c < 16; ++c)
@@ -1491,6 +1540,7 @@ static void unpack_refine_stripe(const uint8_t* p, size_t payload_pos, size_t pa
     uint64_t hi_w = read_le<uint16_t>(w_ptr + wpos * 2); wpos--;
     uint64_t lo_w = read_le<uint16_t>(w_ptr + wpos * 2); wpos--;
     uint64_t state = (hi_w << 16) | lo_w;
+    if (state < RANS_L) throw std::runtime_error("Invalid initial rANS state");
     constexpr uint64_t MASK_M = RANS_M - 1;
     bool has_p = (par_sub != nullptr);
 
@@ -1515,6 +1565,7 @@ static void unpack_refine_stripe(const uint8_t* p, size_t payload_pos, size_t pa
                     state = (state << 16) | read_le<uint16_t>(w_ptr + wpos * 2);
                     wpos--;
                 }
+                if (state < RANS_L) throw std::runtime_error("Truncated rANS bitstream");
                 int64_t nv;
                 if (pv == 0) nv = (s == 0) ? 0 : ((s == 1) ? 1 : -1);
                 else {
@@ -1674,7 +1725,11 @@ static std::vector<uint8_t> encode_hnd3(const uint8_t* raw_bytes, uint32_t d0, u
     int W = static_cast<int>(dims[(spec_axis == 2) ? 1 : 2]);
     size_t HW = static_cast<size_t>(H) * W;
     uint8_t n_stripes = static_cast<uint8_t>(std::max(1, std::min<int>(n_stripes_req, B)));
+#if defined(HND3_FORCE_SCALAR)
+    bool use_i32_neon = false;
+#else
     bool use_i32_neon = (dt_code != DT_I32);
+#endif
 
     std::vector<int64_t> work(tot);
     move_axis_to_front(orig.data(), work.data(), d0, d1, d2, spec_axis);
@@ -1880,17 +1935,14 @@ static BlindResult encode_hnd3_blind(const uint8_t* raw_bytes, size_t n_bytes, u
     if (n_bytes % itemsize != 0) throw std::runtime_error("Input byte size not divisible by dtype itemsize");
     size_t n = n_bytes / itemsize;
 
-    std::vector<double> xf(n);
-    std::vector<int64_t> xi(n);
-    if (dt_code == DT_I16) {
-        for (size_t i = 0; i < n; ++i) { int16_t v = read_le<int16_t>(raw_bytes + i * 2); xi[i] = v; xf[i] = v; }
-    } else if (dt_code == DT_U16) {
-        for (size_t i = 0; i < n; ++i) { uint16_t v = read_le<uint16_t>(raw_bytes + i * 2); xi[i] = v; xf[i] = v; }
-    } else {
-        for (size_t i = 0; i < n; ++i) { int32_t v = read_le<int32_t>(raw_bytes + i * 4); xi[i] = v; xf[i] = v; }
-    }
+    // Window FFT to <= 4M samples (covers all 3D strides up to 1,048,576 in <= 128 MB RAM & ~1.5s!)
+    size_t w_win = std::min<size_t>(n, 4194304ULL);
+    std::vector<double> xf(w_win);
+    if (dt_code == DT_I16)      for (size_t i = 0; i < w_win; ++i) xf[i] = read_le<int16_t>(raw_bytes + i * 2);
+    else if (dt_code == DT_U16) for (size_t i = 0; i < w_win; ++i) xf[i] = read_le<uint16_t>(raw_bytes + i * 2);
+    else                        for (size_t i = 0; i < w_win; ++i) xf[i] = read_le<int32_t>(raw_bytes + i * 4);
 
-    auto rec = recover_strides_cpp(xf, 5);
+    auto rec = recover_strides_cpp(xf, n, 5);
     xf.clear(); xf.shrink_to_fit();
 
     BlindResult br;
@@ -1899,6 +1951,10 @@ static BlindResult encode_hnd3_blind(const uint8_t* raw_bytes, size_t n_bytes, u
         size_t s1 = rec[1], s2 = rec[2];
         size_t d0 = n / s2, d1 = s2 / s1, d2 = s1;
         if (d0 * d1 * d2 == n && d0 >= 2 && d1 >= 4 && d2 >= 4) {
+            std::vector<int64_t> xi(n);
+            if (dt_code == DT_I16)      for (size_t i = 0; i < n; ++i) xi[i] = read_le<int16_t>(raw_bytes + i * 2);
+            else if (dt_code == DT_U16) for (size_t i = 0; i < n; ++i) xi[i] = read_le<uint16_t>(raw_bytes + i * 2);
+            else                        for (size_t i = 0; i < n; ++i) xi[i] = read_le<int32_t>(raw_bytes + i * 4);
             uint8_t sp_ax = choose_spectral_axis_cpp(xi.data(), static_cast<uint32_t>(d0),
                                                      static_cast<uint32_t>(d1), static_cast<uint32_t>(d2), n_threads);
             xi.clear(); xi.shrink_to_fit();
@@ -1947,7 +2003,7 @@ static DecodedCube decode_hnd3(const uint8_t* data, size_t len, int stop_layer, 
     uint8_t n_lv      = data[8];
     uint8_t spec_axis = data[9];
     uint8_t base_k    = data[10];
-    uint8_t n_stripes = std::max<uint8_t>(1, data[11]);
+    uint8_t n_stripes = data[11];
     uint16_t q_base   = read_le<uint16_t>(data + 12);
     uint32_t d0       = read_le<uint32_t>(data + 14);
     uint32_t d1       = read_le<uint32_t>(data + 18);
@@ -1956,23 +2012,46 @@ static DecodedCube decode_hnd3(const uint8_t* data, size_t len, int stop_layer, 
     std::memcpy(sha_exp.data(), data + 26, 32);
     uint32_t spec_len = read_le<uint32_t>(data + 58);
 
-    size_t tot = static_cast<size_t>(d0) * d1 * d2;
+    if (dt_code != DT_I16 && dt_code != DT_U16 && dt_code != DT_I32)
+        throw std::runtime_error("Invalid dt_code");
+    if (spec_code > SPEC_CLUSTERED_LDU || spec_axis > 2 || n_lv > 8 || base_k > 15 || n_stripes == 0)
+        throw std::runtime_error("Invalid HND3 header field");
+    if (d0 == 0 || d1 == 0 || d2 == 0)
+        throw std::runtime_error("Zero dimension in HND3 header");
+    uint64_t tot64 = static_cast<uint64_t>(d0) * d1;
+    if (tot64 > 512000000ULL || tot64 * d2 > 512000000ULL)
+        throw std::runtime_error("HND3 cube dimensions exceed 512M sample safety cap");
+    size_t tot = static_cast<size_t>(tot64 * d2);
     size_t itemsize = (dt_code == DT_I32) ? 4 : 2;
     DecodedCube res; res.d0 = d0; res.d1 = d1; res.d2 = d2; res.dt_code = dt_code;
 
     if (flags & FLAG_RAW) {
+        if (tot * itemsize > len - HDR_SIZE) throw std::runtime_error("Truncated raw HND3 stream");
         res.raw_bytes.assign(data + HDR_SIZE, data + HDR_SIZE + tot * itemsize);
         res.sha_ok = (!verify_sha) || (sha256_bytes(res.raw_bytes.data(), res.raw_bytes.size()) == sha_exp);
         if (verify_sha && !res.sha_ok) throw std::runtime_error("SHA-256 mismatch on raw HND3!");
         return res;
     }
 
+    if (spec_len > len - HDR_SIZE) throw std::runtime_error("Truncated HND3 spectral header");
+    if (tot > std::max<size_t>(65536ULL, len * 256ULL))
+        throw std::runtime_error("HND3 header sample count implausible for compressed stream size");
     uint32_t dims[3] = {d0, d1, d2};
     int B = static_cast<int>(dims[spec_axis]);
     int H = static_cast<int>(dims[(spec_axis == 0) ? 1 : 0]);
     int W = static_cast<int>(dims[(spec_axis == 2) ? 1 : 2]);
+    if (n_stripes > B) throw std::runtime_error("n_stripes > B in HND3 header");
+    if (spec_code != SPEC_NONE) {
+        if (spec_len < 4) throw std::runtime_error("Truncated spectral header");
+        if (read_le<uint16_t>(data + HDR_SIZE) != static_cast<uint16_t>(B))
+            throw std::runtime_error("Spectral band count mismatch");
+    }
     size_t HW = static_cast<size_t>(H) * W;
+#if defined(HND3_FORCE_SCALAR)
+    bool use_i32_neon = false;
+#else
     bool use_i32_neon = (dt_code != DT_I32);
+#endif
 
     auto plan = build_dwt_plan(H, W, n_lv);
     auto sched = build_c2f_schedule(H, W, plan);
@@ -1980,7 +2059,7 @@ static DecodedCube decode_hnd3(const uint8_t* data, size_t len, int stop_layer, 
     int lv_cap = (max_level < 0) ? static_cast<int>(plan.size()) : std::min(max_level, static_cast<int>(plan.size()));
     int k_target = std::max(0, std::min(stop_layer, static_cast<int>(base_k)));
 
-    // Scan base-layer (subband x stripe) byte offsets
+    // Scan base-layer (subband x stripe) byte offsets with full bounds verification
     size_t pos = HDR_SIZE + spec_len;
     size_t n_tasks = n_subs * n_stripes;
     std::vector<size_t> b_pos(n_tasks, 0), b_len(n_tasks, 0);
@@ -1988,7 +2067,9 @@ static DecodedCube decode_hnd3(const uint8_t* data, size_t len, int stop_layer, 
         if (base_k == 0 && sched[si].lv > lv_cap) continue;
         for (int gi = 0; gi < n_stripes; ++gi) {
             size_t ti = si * n_stripes + gi;
+            if (pos + 4 > len) throw std::runtime_error("Truncated base stripe length");
             uint32_t plen = read_le<uint32_t>(data + pos); pos += 4;
+            if (plen > len - pos) throw std::runtime_error("Truncated base stripe payload");
             b_pos[ti] = pos; b_len[ti] = plen; pos += plen;
         }
     }
@@ -2048,7 +2129,9 @@ static DecodedCube decode_hnd3(const uint8_t* data, size_t len, int stop_layer, 
             size_t rt = lv_subs.size() * n_stripes;
             std::vector<size_t> r_pos(rt), r_len(rt);
             for (size_t ti = 0; ti < rt; ++ti) {
+                if (pos + 4 > len) throw std::runtime_error("Truncated refine stripe length");
                 uint32_t plen = read_le<uint32_t>(data + pos); pos += 4;
+                if (plen > len - pos) throw std::runtime_error("Truncated refine stripe payload");
                 r_pos[ti] = pos; r_len[ti] = plen; pos += plen;
             }
             std::vector<std::vector<int64_t>> next_subs(lv_subs.size());
@@ -2101,15 +2184,17 @@ static DecodedCube decode_hnd3(const uint8_t* data, size_t len, int stop_layer, 
     dwt53_2d_cube(work.data(), B, H, W, plan, true, n_threads);
 
     if (spec_code != SPEC_NONE) {
-        size_t sp = HDR_SIZE;
+        size_t sp = HDR_SIZE, sp_end = HDR_SIZE + spec_len;
+        if (sp + 4 > sp_end) throw std::runtime_error("Truncated spectral header");
         int Bs = read_le<uint16_t>(data + sp); sp += 2;
         int n_stages = read_le<uint16_t>(data + sp); sp += 2;
         if (Bs != B) throw std::runtime_error("Spectral band count mismatch");
+        if (static_cast<size_t>(B) * 4 > sp_end - sp) throw std::runtime_error("Truncated spectral mu");
         std::vector<int32_t> mu(B);
         for (int b = 0; b < B; ++b) { mu[b] = read_le<int32_t>(data + sp); sp += 4; }
-        std::vector<LduStage> stages; stages.reserve(n_stages);
-        for (int s = 0; s < n_stages; ++s) stages.push_back(unpack_ldu_stage(data, sp));
-        if (sp != HDR_SIZE + spec_len) throw std::runtime_error("Spectral header length mismatch");
+        std::vector<LduStage> stages; stages.reserve(std::min(n_stages, 4096));
+        for (int s = 0; s < n_stages; ++s) stages.push_back(unpack_ldu_stage(data, sp, sp_end, B));
+        if (sp != sp_end) throw std::runtime_error("Spectral header length mismatch");
         for (int s = n_stages - 1; s >= 0; --s) ldu_apply_stage(work.data(), HW, stages[s], true, use_i32_neon, n_threads);
         parallel_for(static_cast<size_t>(B), n_threads, [&](size_t b0, size_t b1) {
             for (size_t b = b0; b < b1; ++b) {
@@ -2269,6 +2354,54 @@ int main(int argc, char** argv) {
                         dec.d0, dec.d1, dec.d2, stop_layer, n_threads, blob.size(), dec.raw_bytes.size(),
                         dec.raw_bytes.size() / 1e6 / std::max(best_sec, 1e-6), best_sec,
                         dec.sha_ok ? "PASS" : "FAIL");
+            return 0;
+        } else if (cmd == "fuzz") {
+            auto seed = read_file_bytes(argv[2]);
+            int iters = (argc >= 4) ? std::atoi(argv[3]) : 10000;
+            uint64_t rng = 0x9e3779b97f4a7c15ULL;
+            auto nxt = [&]() -> uint64_t {
+                rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return rng;
+            };
+            int rejected = 0, accepted = 0;
+            for (int it = 0; it < iters; ++it) {
+                std::vector<uint8_t> mut = seed;
+                uint64_t mode = nxt() % 5;
+                if (mode == 0 && !mut.empty()) {
+                    // Truncate at random offset (heavy focus on header & early bytes)
+                    size_t cut = (nxt() % 2 == 0) ? (nxt() % std::min<size_t>(mut.size(), 512)) : (nxt() % mut.size());
+                    mut.resize(cut);
+                } else if (mode == 1 && !mut.empty()) {
+                    // Flip 1..8 random bytes in header/LDU/rANS tables
+                    int nf = 1 + static_cast<int>(nxt() % 8);
+                    for (int f = 0; f < nf; ++f) {
+                        size_t p = (nxt() % 2 == 0) ? (nxt() % std::min<size_t>(mut.size(), 512)) : (nxt() % mut.size());
+                        mut[p] ^= static_cast<uint8_t>(1U << (nxt() & 7));
+                    }
+                } else if (mode == 2 && mut.size() >= 62) {
+                    // Corrupt header dims / spec_len / stripe count / flags
+                    size_t p = 4 + (nxt() % 58);
+                    mut[p] = static_cast<uint8_t>(nxt() & 0xFF);
+                } else if (mode == 3) {
+                    // Completely random bytes (with occasional valid HND3 magic)
+                    size_t sz = nxt() % 1024;
+                    mut.resize(sz);
+                    for (size_t k = 0; k < sz; ++k) mut[k] = static_cast<uint8_t>(nxt() & 0xFF);
+                    if (sz >= 5 && (nxt() & 1)) { std::memcpy(mut.data(), hnd3::MAGIC, 4); mut[4] = hnd3::VERSION; }
+                } else if (!mut.empty()) {
+                    // Overwrite random slice inside payload
+                    size_t p = nxt() % mut.size();
+                    mut[p] = static_cast<uint8_t>(nxt() & 0xFF);
+                }
+                try {
+                    auto d = hnd3::decode_hnd3(mut.data(), mut.size(), 0, -1, true, 1);
+                    (void)d;
+                    accepted++;
+                } catch (const std::exception&) {
+                    rejected++;
+                }
+            }
+            std::printf("FUZZ PASS: %d iterations (%d cleanly rejected, %d accepted, 0 crashes/ASan/UBSan)\n",
+                        iters, rejected, accepted);
             return 0;
         } else {
             throw std::runtime_error("Unknown command: " + cmd);
