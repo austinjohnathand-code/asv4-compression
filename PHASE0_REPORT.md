@@ -6,7 +6,7 @@ This report documents the empirical results of the upgraded **Phase 0 Falsificat
 
 ## 1. Gaps Closed in v2.2 (vs. v2.1 Draft)
 
-The original v2.1 draft (`gemini-code-1795774997381.py`) was truncated mid-`run_partB` and carried explicit `HONEST SCOPE NOTES` warning of missing components. Every gap has been closed and verified:
+The initial v2.1 draft was truncated mid-`run_partB` and carried explicit `HONEST SCOPE NOTES` warning of missing components. Every gap has been closed and verified:
 
 1. **Restored & Completed Harness**: Completed `run_partB` (Gate `0D`), `run_selftest()`, and the CLI (`selftest`, `partA`, `partB`, `trackB`, `all`), plus added a `--mat` / `--mat-key` loader for standard MATLAB hyperspectral cubes `(H, W, B) → (B, H, W)`.
 2. **Real Single-Pass Bit-Exact Golomb-Rice Bitstream Coder**: Added a Numba-JIT causal context-adaptive Golomb-Rice encoder/decoder (`_rice_encode_3d_numba` / `_rice_decode_3d_numba`, CCSDS-123 accumulator halving at `cnt == 64` + 32-bit escape path, verified bit-for-bit lossless round-trip) alongside the idealized two-pass Laplace estimator (`est b/s`) on every row `R1`–`R5c`.

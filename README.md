@@ -17,7 +17,7 @@
 
 ```mermaid
 flowchart LR
-    IN["Input Stream (stdin/file)"] --> FG["16 MB Flush Group + SHA-256"]
+    IN["Input Stream (stdin/file)"] --> FG["16 MiB Flush Group + SHA-256"]
     FG --> SEG["Coupled Stage 1 & 2: NEON M(L) + Per-Plane zstd-1 + Viterbi DP + LDM/zstd-3 Gates"]
     SEG -->|"T0 (Fallback)"| RAW["S_RAW (Persistent zstd --long)"]
     SEG -->|"T1 / T2_XOR / T2_ELEM / T2_BIT / T2_NIBROT"| XF["Fused NEON Transform → S_XFORM (Persistent zstd)"]
@@ -32,7 +32,7 @@ See **[`ARCHITECTURE.md`](ARCHITECTURE.md)** for full Mermaid diagrams of the tw
 ## Benchmark Results (16 Datasets / 4.95 GiB, Single-Threaded ARM64)
 
 ### Head-to-Head on Real Public AI Weights & Astronomy Data (Sizes in Binary `MiB`)
-*(All external baselines verified bit-exact lossless round-trip; aligned `.safetensors` baselines include exact header bytes. ZipNN optimizes for multi-threaded model-loading throughput on aligned tensors, whereas ASV4 is a general-purpose, single-threaded, schema-free streaming compressor requiring no `.safetensors` parser. OpenZL `le32` `398.43 MiB` reflects the verified chunk-33 fix documented in [`v3/REPORT_V4.md`](v3/REPORT_V4.md). On `real_gpt2_f32` and `real_smollm2_bf16`, L3 and L19 match because high-$H_0$ `T2_NIBROT` lanes cap `c_xform` to L3 to prevent `ZSTD_btultra2` noise-chasing regressions.)*
+*(All external baselines verified bit-exact lossless round-trip; aligned `.safetensors` baselines include exact header bytes. ZipNN optimizes for multi-threaded model-loading throughput on aligned tensors, whereas ASV4 is a general-purpose, single-threaded, schema-free streaming compressor requiring no `.safetensors` parser. OpenZL `le32` `398.43 MiB` reflects the verified chunk-32 fix (0-indexed final chunk of 33) documented in [`v3/AUDIT_V3.md`](v3/AUDIT_V3.md) and [`v3/REPORT_V4.md`](v3/REPORT_V4.md). On `real_gpt2_f32` and `real_smollm2_bf16`, L3 and L19 match because high-$H_0$ `T2_NIBROT` lanes cap `c_xform` to L3 to prevent `ZSTD_btultra2` noise-chasing regressions.)*
 
 | Real Public Dataset | Orig (`MiB`) | `zstd -3` / `-19` (`libzstd 1.5.5` C API) | `Blosc2` (`zstd7`) | `OpenZL 0.3.0` *(Verified Round-Trip)* | `ZipNN 0.5.4` *(Aligned, Verified)* | **Blind `ASV4 v4.1` (L3 / L19)** |
 |---|---:|---:|---:|---:|---:|---:|
@@ -159,7 +159,7 @@ python3 v3/bench_final_refresh.py
 | [`v3/build_corpus.py`](v3/build_corpus.py) | Builds the original 10-file pre-registered corpus in `v3/corpus/` |
 | [`v3/REPORT_V4.md`](v3/REPORT_V4.md) | Complete **ASV4 v4.1** technical report (16 datasets, OpenZL/Blosc2/ZipNN comparisons, theoretical analysis) |
 | [`v3/REPORT_V3.md`](v3/REPORT_V3.md) | Staged Phase 0 → 1A → 1B → 2 build report & Kill Gate 1B falsification record |
-| [`v3/AUDIT_V3.md`](v3/AUDIT_V3.md) | Forensic audit artifacts (corpus provenance, C-API baselines, divergence traces, OpenZL chunk-32 fix) |
+| [`v3/AUDIT_V3.md`](v3/AUDIT_V3.md) | Forensic audit artifacts (corpus provenance, C-API baselines, divergence traces, OpenZL chunk-32 fix (0-indexed final chunk of 33)) |
 | [`v3/final_refresh_results_v4.1.csv`](v3/final_refresh_results_v4.1.csv) | Canonical 16-dataset `v4.1` L3 & L19 CSV (plus archived `v3.0` and `v4.0` CSVs) |
 | [`v3/codec.py`](v3/codec.py), [`v3/transforms.py`](v3/transforms.py) | Phase 1A Python/Numba reference implementation (wire-compatible with `v3`) |
 | [`v3/stage3_forest.py`](v3/stage3_forest.py) | Phase 1B Stage 3 delta-forest ablation (falsified & cut per Kill Gate 1B) |
@@ -176,7 +176,8 @@ python3 v3/bench_final_refresh.py
 - **I. Daubechies & W. Sweldens (1998)**, *Factoring Wavelet Transforms into Lifting Steps*, J. Fourier Anal. Appl. (3-shear diagonal lifting & lifting framework).
 - **A. R. Calderbank, I. Daubechies, W. Sweldens, & B.-L. Yeo (1998)**, *Wavelet Transforms That Map Integers to Integers*, Appl. Comput. Harmon. Anal. (reversible 5/3 integer wavelet).
 - **L. Galli & S. Salzo (2004)**, *Lossless Hyperspectral Compression Using KLT*, IEEE IGARSS (reversible KLT for hyperspectral imagery).
-- **I. Blanes & J. Serra-Sagristà (2010)**, *Pairwise Orthogonal Transform for Spectral Image Coding*, IEEE Trans. Geosci. Remote Sens. (POT spectral decorrelation).
+- **I. Blanes & J. Serra-Sagristà (2010)**, *Cost and Scalability Improvements to the Karhunen–Loève Transform for Remote-Sensing Image Coding*, IEEE Trans. Geosci. Remote Sens. 48(7); and *Clustered Reversible-KLT for Progressive Lossy-to-Lossless 3D Image Coding*, Proc. IEEE DCC 2009 (multilevel clustered RKLT lineage behind `clust` mode).
+- **I. Blanes & J. Serra-Sagristà (2011)**, *Pairwise Orthogonal Transform for Spectral Image Coding*, IEEE Trans. Geosci. Remote Sens. 49(3) (published online 2010; POT spectral decorrelation).
 - **J. Duda (2009 / 2013)**, *Asymmetric Numeral Systems*, arXiv:0902.0271 / arXiv:1311.2540 (32-bit rANS entropy coding).
 - **A. de Cheveigné & H. Kawahara (2002)**, *YIN, a Fundamental Frequency Estimator for Speech and Music*, J. Acoust. Soc. Am. (rectified fundamental stride selection).
 - **CCSDS 123.0-B-1 / 123.0-B-2**, *Low-Complexity Lossless and Near-Lossless Multispectral and Hyperspectral Image Compression*, Consultative Committee for Space Data Systems.

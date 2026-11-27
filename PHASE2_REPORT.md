@@ -32,7 +32,9 @@ Every row below is decoded from a **truncated prefix of the exact same lossless 
 | `k = 2` (`~4`) | `2.42 MB` (`4.605 b/s`, `3.47×`) → `73.18 dB` | `7.49 MB` (`2.643 b/s`, `6.05×`) → `72.84 dB` | `12.37 MB` (`4.633 b/s`, `3.45×`) → `70.87 dB` |
 | `k = 1` (`~2`) | `2.98 MB` (`5.678 b/s`, `2.82×`) → `76.11 dB` | `10.79 MB` (`3.808 b/s`, `4.20×`) → `75.48 dB` | `15.21 MB` (`5.695 b/s`, `2.81×`) → `72.68 dB` |
 | **`k = 0` (Full Lossless)** | **`3.44 MB` (`6.544 b/s`, `2.44×`) → ∞ (SHA-256)** | **`13.42 MB` (`4.736 b/s`, `3.38×`) → ∞ (SHA-256)** | **`17.51 MB` (`6.558 b/s`, `2.44×`) → ∞ (SHA-256)** |
-| *vs. Std CCSDS-123 (`Rice`)* | *Beats `6.734` by **`-0.190 b/s` (`+2.8%`)*** | *Beats `5.094` by **`-0.358 b/s` (`+7.0%`)*** | *Beats `6.839` by **`-0.281 b/s` (`+4.1%`)*** |
+| *vs. Std CCSDS-123 (`Rice`)†* | *Beats `6.734` by **`-0.190 b/s` (`+2.8%`)*** | *Beats `5.094` by **`-0.358 b/s` (`+7.0%`)*** | *Beats `6.839` by **`-0.281 b/s` (`+4.1%`)*** |
+
+*†Historical row: these CCSDS-123.0-B-1 rates were measured on Phase 0 `//8`-cropped cubes, while `.hnd2` ran on full native cubes. For exact uncropped apples-to-apples CCSDS-123 (`P=3` & `P=15`, plus `+3D-rANS`) and official external codec comparisons, see [`PHASE3_REPORT.md`](PHASE3_REPORT.md) §2.*
 
 ---
 
