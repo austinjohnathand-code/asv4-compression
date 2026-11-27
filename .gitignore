@@ -8,14 +8,17 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
-# Compiled binaries
+# Compiled binaries & libraries
 asv4
 hnd2
 hnd3
+libhnd3.a
 v3/cpp/asv3
 v3/cpp/zstd_capi_bench
 *.o
+*.a
 *.out
+crash-*
 
 # Large benchmark corpora & temporary compressed outputs (5+ GB)
 v3/corpus/*
@@ -24,4 +27,6 @@ v3/corpus_real/*
 phase0_data/*
 *.asv3
 *.asv4
+*.hnd3
+*.hnd4
 .final*

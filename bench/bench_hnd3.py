@@ -692,6 +692,122 @@ def cmd_holdouts():
                 print(f"  {'JPEG-XL cjxl 0.13 (-d 0 -e 7)':<36} {xb:>10,} B ({xb*8/cube.size:>6.3f} b/s) decMT={cube.nbytes/1e6/xds:>5.1f} MB/s")
 
 
+def cmd_hnd4_tiled():
+    print("=" * 124)
+    print("HND4 STREAMING SPATIAL TILING: PEAK RSS, BITRATE DELTA, SPEED, & RANDOM-ACCESS SINGLE-TILE DECODE")
+    print("=" * 124)
+    cubes = [
+        ("Indian_pines", load_mat_cube("Indian_pines.mat"), "i16", [0, 64, 128]),
+        ("Salinas", load_mat_cube("Salinas.mat"), "i16", [0, 128, 256]),
+        ("PaviaU", load_mat_cube("PaviaU.mat"), "i16", [0, 128, 256]),
+        ("AVIRIS_holdout_i16", load_aviris_i16(), "i16", [0, 128, 256, 512]),
+    ]
+    for name, cube, dt, tile_sizes in cubes:
+        B, H, W = cube.shape
+        n_bytes = cube.nbytes
+        sh = f"{B},{H},{W}"
+        print(f"\n### {name} {cube.shape} ({n_bytes/1e6:.2f} MB)")
+        print(f"{'Format / Tile':<22} | {'k':>1} | {'Bytes':>10} | {'b/s':>6} | {'Delta':>7} | {'Enc16T':>7} | {'Dec16T':>7} | {'EncRSS':>7} | {'DecRSS':>7} | {'1-Tile ms (lossless / k6)':>25}")
+        print("-" * 124)
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            rp = str(td / f"{name}.raw")
+            cube.tofile(rp)
+            base_bps = {}
+            for k in (0, 6):
+                for ts in tile_sizes:
+                    hp = str(td / f"{name}_t{ts}_k{k}.hnd4")
+                    out_p = str(td / f"{name}_t{ts}_k{k}_dec.raw")
+                    cmd_e = [HND3_BIN, "enc", rp, hp, "--shape", sh, "--dtype", dt, "--base-k", str(k), "--no-verify"]
+                    if ts > 0:
+                        cmd_e += ["--tile-size", str(ts)]
+                    oe, _, _, enc_rss = run_with_rss(cmd_e)
+                    cmd_d = [HND3_BIN, "dec", hp, out_p]
+                    od, _, _, dec_rss = run_with_rss(cmd_d)
+                    assert Path(out_p).read_bytes() == Path(rp).read_bytes(), f"Mismatch {name} ts={ts} k={k}"
+                    sz = os.path.getsize(hp)
+                    bps = sz * 8.0 / cube.size
+                    if ts == 0:
+                        base_bps[k] = bps
+                        delta_s = "  base"
+                    else:
+                        delta_s = f"{bps - base_bps[k]:>+6.3f}"
+                    em = float(re.search(r"([0-9.]+)\s+MB/s", oe).group(1))
+                    dm = float(re.search(r"([0-9.]+)\s+MB/s", od).group(1))
+                    # Single-tile random-access timing (interior or 0,0 tile)
+                    ra_s = "—"
+                    if ts > 0:
+                        ty = min(1, (H - 1) // ts)
+                        tx = min(1, (W - 1) // ts)
+                        tp = str(td / "tile.raw")
+                        t_full = []
+                        for _ in range(3):
+                            t0 = time.perf_counter()
+                            subprocess.run([HND3_BIN, "dec", hp, tp, "--tile", f"{ty},{tx}"],
+                                           check=True, stdout=subprocess.DEVNULL)
+                            t_full.append((time.perf_counter() - t0) * 1000.0)
+                        if k == 6:
+                            t_p = []
+                            for _ in range(3):
+                                t0 = time.perf_counter()
+                                subprocess.run([HND3_BIN, "dec", hp, tp, "--tile", f"{ty},{tx}", "--stop-layer", "6"],
+                                               check=True, stdout=subprocess.DEVNULL)
+                                t_p.append((time.perf_counter() - t0) * 1000.0)
+                            ra_s = f"{min(t_full):5.1f} ms / {min(t_p):4.1f} ms"
+                        else:
+                            ra_s = f"{min(t_full):5.1f} ms / —"
+                    lbl = "HND3 untiled" if ts == 0 else f"HND4 tile={ts} ({(H+ts-1)//ts}x{(W+ts-1)//ts})"
+                    print(f"{lbl:<22} | {k:>1} | {sz:>10,} | {bps:>6.3f} | {delta_s:>7} | {em:>5.1f}MB | {dm:>5.1f}MB | {enc_rss:>5.0f}MB | {dec_rss:>5.0f}MB | {ra_s:>25}")
+
+
+def cmd_near_lossless():
+    print("=" * 124)
+    print("HND4 GUARANTEED-L_INF NEAR-LOSSLESS (--max-error E) RATE-DISTORTION ON FULL UNCROPPED CUBES")
+    print("=" * 124)
+    cubes = [
+        ("Indian_pines", load_mat_cube("Indian_pines.mat"), "i16", 0),
+        ("Salinas", load_mat_cube("Salinas.mat"), "i16", 256),
+        ("PaviaU", load_mat_cube("PaviaU.mat"), "i16", 256),
+        ("AVIRIS_holdout_i16", load_aviris_i16(), "i16", 256),
+    ]
+    for name, cube, dt, ts in cubes:
+        B, H, W = cube.shape
+        orig64 = cube.astype(np.int64)
+        dyn = float(orig64.max() - orig64.min())
+        sh = f"{B},{H},{W}"
+        print(f"\n### {name} {cube.shape} ({cube.nbytes/1e6:.2f} MB, tile_size={ts or 'untiled'}, dyn={dyn:.0f})")
+        print(f"{'E (L_inf)':>9} | {'Bytes':>10} | {'b/s':>6} | {'Ratio':>6} | {'PSNR_rng':>9} | {'SAM_mean':>8} | {'SAM_p99':>8} | {'MaxErr':>6} | {'Enc16T':>8} | {'Dec16T':>8}")
+        print("-" * 108)
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            rp = str(td / f"{name}.raw")
+            cube.tofile(rp)
+            for E in (0, 1, 2, 4, 8):
+                hp = str(td / f"{name}_e{E}.hnd4")
+                dp = str(td / f"{name}_e{E}.raw")
+                cmd_e = [HND3_BIN, "enc", rp, hp, "--shape", sh, "--dtype", dt, "--base-k", "0",
+                         "--max-error", str(E), "--crc", "--no-verify"]
+                if ts > 0:
+                    cmd_e += ["--tile-size", str(ts)]
+                oe = subprocess.check_output(cmd_e, text=True)
+                od = subprocess.check_output([HND3_BIN, "dec", hp, dp], text=True)
+                sz = os.path.getsize(hp)
+                em = float(re.search(r"([0-9.]+)\s+MB/s", oe).group(1))
+                dm = float(re.search(r"([0-9.]+)\s+MB/s", od).group(1))
+                rec = np.fromfile(dp, dtype=cube.dtype).reshape(cube.shape).astype(np.int64)
+                diff = np.abs(orig64 - rec)
+                linf = int(diff.max())
+                assert linf <= E, f"L_inf violated: {linf} > {E}"
+                mse = float(np.mean(diff.astype(np.float64) ** 2))
+                if mse == 0.0:
+                    psnr_r, sam_m, sam_99 = "inf", "0.000°", "0.000°"
+                else:
+                    psnr_r = f"{20.0 * math.log10(dyn / math.sqrt(mse)):.2f} dB"
+                    sm, s99 = compute_sam_deg(orig64, rec)
+                    sam_m, sam_99 = f"{sm:.3f}°", f"{s99:.3f}°"
+                print(f"E={E:<7} | {sz:>10,} | {sz*8/cube.size:>6.3f} | {cube.nbytes/sz:>5.2f}x | {psnr_r:>9} | {sam_m:>8} | {sam_99:>8} | {linf:>6} | {em:>6.1f}MB | {dm:>6.1f}MB")
+
+
 def main():
     print_environment()
     cmd = sys.argv[1] if len(sys.argv) > 1 else "all"
@@ -705,6 +821,10 @@ def main():
         cmd_blind6()
     if cmd in ("holdouts", "all"):
         cmd_holdouts()
+    if cmd in ("hnd4_tiled", "all"):
+        cmd_hnd4_tiled()
+    if cmd in ("near_lossless", "all"):
+        cmd_near_lossless()
 
 
 if __name__ == "__main__":

@@ -54,4 +54,46 @@ jobs:
               subprocess.run(["./hnd3", "dec", f"/tmp/ci_k{k}.hnd3", f"/tmp/ci_k{k}.raw"], check=True)
               assert open(f"/tmp/ci_k{k}.raw", "rb").read() == cube.tobytes()
               print(f"k={k} compressed sha256:", hashlib.sha256(open(f"/tmp/ci_k{k}.hnd3", "rb").read()).hexdigest())
+          # HND4 tiled + near-lossless cross-arch sanity
+          subprocess.run(
+              ["./hnd3", "enc", "/tmp/ci_cube.raw", "/tmp/ci_tiled.hnd4",
+               "--shape", "32,48,48", "--dtype", "i16", "--base-k", "6", "--tile-size", "24"],
+              check=True,
+          )
+          subprocess.run(["./hnd3", "dec", "/tmp/ci_tiled.hnd4", "/tmp/ci_tiled.raw"], check=True)
+          assert open("/tmp/ci_tiled.raw", "rb").read() == cube.tobytes()
+          print("hnd4 tiled sha256:", hashlib.sha256(open("/tmp/ci_tiled.hnd4", "rb").read()).hexdigest())
           EOF
+
+  fuzz-asan-ubsan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Clang, libzstd, and Python deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libzstd-dev python3-pip
+          python3 -m pip install --upgrade numpy zstandard
+
+      - name: Build production tools and libFuzzer+ASan+UBSan targets
+        run: |
+          make asv4 libhnd3.a hnd3
+          make fuzz FUZZ_CXX=clang++
+
+      - name: Run coverage-guided libFuzzer + ASan + UBSan smoke campaign (HND3/HND4 + ASV4)
+        run: |
+          mkdir -p /tmp/ci_corp_hnd3 /tmp/ci_corp_asv4
+          python3 - << 'EOF'
+          import subprocess, numpy as np
+          rng = np.random.default_rng(7)
+          c = rng.integers(-1000, 1000, (8, 16, 16), dtype="<i2")
+          c.tofile("/tmp/ci_s.raw")
+          subprocess.run(["./hnd3", "enc", "/tmp/ci_s.raw", "/tmp/ci_corp_hnd3/v3.hnd3", "--shape", "8,16,16", "--dtype", "i16", "--base-k", "6", "--threads", "1"], check=True)
+          subprocess.run(["./hnd3", "enc", "/tmp/ci_s.raw", "/tmp/ci_corp_hnd3/v4.hnd4", "--shape", "8,16,16", "--dtype", "i16", "--base-k", "6", "--tile-size", "8", "--max-error", "2", "--threads", "1"], check=True)
+          open("/tmp/ci_a.raw", "wb").write(b"ASV4 CI fuzz seed! " * 200)
+          subprocess.run(["./asv4", "c", "/tmp/ci_a.raw", "/tmp/ci_corp_asv4/t0.asv4", "--level", "3"], check=True)
+          EOF
+          /tmp/fuzz_hnd3 /tmp/ci_corp_hnd3 -max_total_time=20 -max_len=16384 -print_final_stats=1
+          /tmp/fuzz_asv4 /tmp/ci_corp_asv4 -max_total_time=20 -max_len=16384 -print_final_stats=1

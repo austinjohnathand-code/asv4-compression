@@ -1821,6 +1821,12 @@ private:
     ZSTD_CCtx* cctx_ = nullptr;
 };
 
+#ifdef ASV3_FUZZ_BUILD
+#define ASV3_DEC_ERR(...) do {} while (0)
+#else
+#define ASV3_DEC_ERR(...) std::fprintf(stderr, __VA_ARGS__)
+#endif
+
 class LazyZstdDecoder {
 public:
     explicit LazyZstdDecoder(uint8_t wlog) : wlog_(wlog) {}
@@ -1837,7 +1843,7 @@ public:
         while (true) {
             size_t prev = dst.size();
             if (prev + step > max_dst_bytes) {
-                std::fprintf(stderr, "Decompressed buffer exceeds safety cap (%zu bytes)\n", max_dst_bytes);
+                ASV3_DEC_ERR("Decompressed buffer exceeds safety cap (%zu bytes)\n", max_dst_bytes);
                 return false;
             }
             // Grow linearly in 4 MB chunks past 4 MB instead of geometric 2x doubling (saves ~40-60 MB RSS)
@@ -1851,7 +1857,7 @@ public:
             ZSTD_outBuffer out_b{dst.data() + prev, step, 0};
             size_t ret = ZSTD_decompressStream(dctx_, &out_b, &in_b);
             if (ZSTD_isError(ret)) {
-                std::fprintf(stderr, "ZSTD_decompressStream error: %s\n", ZSTD_getErrorName(ret));
+                ASV3_DEC_ERR("ZSTD_decompressStream error: %s\n", ZSTD_getErrorName(ret));
                 return false;
             }
             dst.resize(prev + out_b.pos);
@@ -2169,15 +2175,15 @@ int run_encode(FILE* fin, FILE* fout, const Config& cfg, const std::string& stat
 int run_decode(FILE* fin, FILE* fout) {
     FileHeader fhdr;
     if (read_exact(fin, reinterpret_cast<uint8_t*>(&fhdr), sizeof(fhdr)) != sizeof(fhdr)) {
-        std::fprintf(stderr, "Truncated FileHeader\n");
+        ASV3_DEC_ERR("Truncated FileHeader\n");
         return 1;
     }
     if (std::memcmp(fhdr.magic, MAGIC, 4) != 0 || (fhdr.version != VERSION_V3 && fhdr.version != VERSION)) {
-        std::fprintf(stderr, "Invalid ASV3 header\n");
+        ASV3_DEC_ERR("Invalid ASV3 header\n");
         return 1;
     }
     if (fhdr.wlog < 10 || fhdr.wlog > 27) {
-        std::fprintf(stderr, "Invalid ASV3 wlog: %u\n", fhdr.wlog);
+        ASV3_DEC_ERR("Invalid ASV3 wlog: %u\n", fhdr.wlog);
         return 1;
     }
 
@@ -2188,8 +2194,13 @@ int run_decode(FILE* fin, FILE* fout) {
     Sha256 sha;
     uint64_t total_out = 0;
 
+#ifdef ASV3_FUZZ_BUILD
+    constexpr size_t MAX_META_Q = 1 * MB;
+    constexpr size_t MAX_DATA_Q = 4 * MB;
+#else
     constexpr size_t MAX_META_Q = 16 * MB;
     constexpr size_t MAX_DATA_Q = 64 * MB;
+#endif
     std::vector<uint8_t> comp_buf;
     std::vector<uint8_t> meta_q, raw_q, xform_q;
     std::vector<uint8_t> rec_buf, scratch;
@@ -2208,29 +2219,29 @@ int run_decode(FILE* fin, FILE* fout) {
     while (true) {
         uint8_t tag = 0;
         if (read_exact(fin, &tag, 1) != 1) {
-            std::fprintf(stderr, "Unexpected EOF before FileTrailer\n");
+            ASV3_DEC_ERR("Unexpected EOF before FileTrailer\n");
             return 1;
         }
         if (tag == TAG_DATA) {
             uint32_t lens[5];
             if (read_exact(fin, reinterpret_cast<uint8_t*>(lens), sizeof(lens)) != sizeof(lens)) {
-                std::fprintf(stderr, "Truncated GroupHeader\n");
+                ASV3_DEC_ERR("Truncated GroupHeader\n");
                 return 1;
             }
             uint32_t grp_uncomp = lens[0], lm = lens[1], lr = lens[2], lx = lens[3], ld = lens[4];
             if (ld != 0) {
-                std::fprintf(stderr, "Unsupported non-zero S_RESID stream (len=%u)\n", ld);
+                ASV3_DEC_ERR("Unsupported non-zero S_RESID stream (len=%u)\n", ld);
                 return 1;
             }
             auto feed = [&](uint32_t len, LazyZstdDecoder& dec, std::vector<uint8_t>& q, size_t cap) -> bool {
                 if (len == 0) return true;
                 if (len > cap) {
-                    std::fprintf(stderr, "Compressed payload exceeds safety cap (%u > %zu)\n", len, cap);
+                    ASV3_DEC_ERR("Compressed payload exceeds safety cap (%u > %zu)\n", len, cap);
                     return false;
                 }
                 comp_buf.resize(len);
                 if (read_exact(fin, comp_buf.data(), len) != len) {
-                    std::fprintf(stderr, "Truncated stream payload\n");
+                    ASV3_DEC_ERR("Truncated stream payload\n");
                     return false;
                 }
                 return dec.decompress_append(comp_buf.data(), len, q, cap);
@@ -2249,17 +2260,17 @@ int run_decode(FILE* fin, FILE* fout) {
                 m_pos += sizeof(rec);
 
                 if (rec.delta_op != DELTA_NONE) {
-                    std::fprintf(stderr, "Unsupported delta_op: %u\n", rec.delta_op);
+                    ASV3_DEC_ERR("Unsupported delta_op: %u\n", rec.delta_op);
                     return 1;
                 }
 
                 if (rec.transform_id == T0_IDENTITY) {
                     if (rec.tail_len != 0) {
-                        std::fprintf(stderr, "Corrupt T0 MetaRecord: non-zero tail_len %u\n", rec.tail_len);
+                        ASV3_DEC_ERR("Corrupt T0 MetaRecord: non-zero tail_len %u\n", rec.tail_len);
                         return 1;
                     }
                     if (r_pos > raw_q.size() || rec.orig_len > raw_q.size() - r_pos) {
-                        std::fprintf(stderr, "Corrupt stream: T0 read out of bounds (%zu + %u > %zu)\n",
+                        ASV3_DEC_ERR("Corrupt stream: T0 read out of bounds (%zu + %u > %zu)\n",
                                      r_pos, rec.orig_len, raw_q.size());
                         return 1;
                     }
@@ -2269,26 +2280,26 @@ int run_decode(FILE* fin, FILE* fout) {
                     sha.update(ptr, rec.orig_len);
                 } else {
                     if (rec.transform_id > T2_NIBROT) {
-                        std::fprintf(stderr, "Corrupt MetaRecord: unknown transform_id %u\n", rec.transform_id);
+                        ASV3_DEC_ERR("Corrupt MetaRecord: unknown transform_id %u\n", rec.transform_id);
                         return 1;
                     }
                     if (rec.w == 0) {
-                        std::fprintf(stderr, "Corrupt MetaRecord: zero width w for transform %u\n", rec.transform_id);
+                        ASV3_DEC_ERR("Corrupt MetaRecord: zero width w for transform %u\n", rec.transform_id);
                         return 1;
                     }
                     if (rec.tail_len > rec.orig_len) {
-                        std::fprintf(stderr, "Corrupt MetaRecord: tail_len %u > orig_len %u\n",
+                        ASV3_DEC_ERR("Corrupt MetaRecord: tail_len %u > orig_len %u\n",
                                      rec.tail_len, rec.orig_len);
                         return 1;
                     }
                     size_t xlen = static_cast<size_t>(rec.orig_len) - static_cast<size_t>(rec.tail_len);
                     if (x_pos > xform_q.size() || xlen > xform_q.size() - x_pos) {
-                        std::fprintf(stderr, "Corrupt stream: S_XFORM read out of bounds (%zu + %zu > %zu)\n",
+                        ASV3_DEC_ERR("Corrupt stream: S_XFORM read out of bounds (%zu + %zu > %zu)\n",
                                      x_pos, xlen, xform_q.size());
                         return 1;
                     }
                     if (r_pos > raw_q.size() || rec.tail_len > raw_q.size() - r_pos) {
-                        std::fprintf(stderr, "Corrupt stream: tail read out of bounds (%zu + %u > %zu)\n",
+                        ASV3_DEC_ERR("Corrupt stream: tail read out of bounds (%zu + %u > %zu)\n",
                                      r_pos, rec.tail_len, raw_q.size());
                         return 1;
                     }
@@ -2309,7 +2320,7 @@ int run_decode(FILE* fin, FILE* fout) {
                 grp_dec += rec.orig_len;
             }
             if (grp_dec != grp_uncomp) {
-                std::fprintf(stderr, "FlushGroup length mismatch: %llu vs %u\n",
+                ASV3_DEC_ERR("FlushGroup length mismatch: %llu vs %u\n",
                              static_cast<unsigned long long>(grp_dec), grp_uncomp);
                 return 1;
             }
@@ -2319,22 +2330,22 @@ int run_decode(FILE* fin, FILE* fout) {
         } else if (tag == TAG_EOF) {
             uint32_t flens[4];
             if (read_exact(fin, reinterpret_cast<uint8_t*>(flens), sizeof(flens)) != sizeof(flens)) {
-                std::fprintf(stderr, "Truncated TrailerHeader\n");
+                ASV3_DEC_ERR("Truncated TrailerHeader\n");
                 return 1;
             }
             if (flens[3] != 0) {
-                std::fprintf(stderr, "Unsupported non-zero S_RESID trailer (len=%u)\n", flens[3]);
+                ASV3_DEC_ERR("Unsupported non-zero S_RESID trailer (len=%u)\n", flens[3]);
                 return 1;
             }
             auto drain = [&](uint32_t len, LazyZstdDecoder& dec, std::vector<uint8_t>& q, size_t cap) -> bool {
                 if (len == 0) return true;
                 if (len > cap) {
-                    std::fprintf(stderr, "Trailer payload exceeds safety cap (%u > %zu)\n", len, cap);
+                    ASV3_DEC_ERR("Trailer payload exceeds safety cap (%u > %zu)\n", len, cap);
                     return false;
                 }
                 comp_buf.resize(len);
                 if (read_exact(fin, comp_buf.data(), len) != len) {
-                    std::fprintf(stderr, "Truncated trailer stream payload\n");
+                    ASV3_DEC_ERR("Truncated trailer stream payload\n");
                     return false;
                 }
                 return dec.decompress_append(comp_buf.data(), len, q, cap);
@@ -2345,26 +2356,26 @@ int run_decode(FILE* fin, FILE* fout) {
                 return 1;
             }
             if (!meta_q.empty() || !raw_q.empty() || !xform_q.empty()) {
-                std::fprintf(stderr, "Trailing unconsumed stream bytes at EOF (meta=%zu raw=%zu xform=%zu)\n",
+                ASV3_DEC_ERR("Trailing unconsumed stream bytes at EOF (meta=%zu raw=%zu xform=%zu)\n",
                              meta_q.size(), raw_q.size(), xform_q.size());
                 return 1;
             }
 
             TrailerTail ttail;
             if (read_exact(fin, reinterpret_cast<uint8_t*>(&ttail), sizeof(ttail)) != sizeof(ttail)) {
-                std::fprintf(stderr, "Truncated TrailerTail\n");
+                ASV3_DEC_ERR("Truncated TrailerTail\n");
                 return 1;
             }
             uint8_t actual[32];
             sha.final(actual);
             if (total_out != ttail.total_orig_size || std::memcmp(actual, ttail.sha256, 32) != 0) {
-                std::fprintf(stderr, "SHA-256 verification FAILED!\n");
+                ASV3_DEC_ERR("SHA-256 verification FAILED!\n");
                 return 1;
             }
             std::fflush(fout);
             return 0;
         } else {
-            std::fprintf(stderr, "Unknown tag: 0x%02x\n", tag);
+            ASV3_DEC_ERR("Unknown tag: 0x%02x\n", tag);
             return 1;
         }
     }
@@ -2372,6 +2383,7 @@ int run_decode(FILE* fin, FILE* fout) {
 
 }  // namespace asv3
 
+#ifndef ASV3_NO_MAIN
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr, "Usage: asv3 <c|d> [in|-] [out|-] [--level 3|19] [--block-mb 4] [--stats file.json]\n");
@@ -2415,3 +2427,4 @@ int main(int argc, char** argv) {
     if (out_path != "-") std::fclose(fout);
     return rc;
 }
+#endif  // ASV3_NO_MAIN

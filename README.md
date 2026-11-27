@@ -1,11 +1,11 @@
-# `asv4-compression` — Two Lossless C++20 Codecs: ASV4 (Streaming 1D) & HND3 (3D Hyperspectral)
+# `asv4-compression` — Two C++20 Codecs: ASV4 (Streaming 1D) & HND3/HND4 (3D Hyperspectral)
 
-This repository contains **two independent C++20 lossless codecs** built under a staged falsification methodology:
+This repository contains **two independent C++20 codecs** built under a staged falsification methodology:
 
-1. **ASV4 (`v4.1`, [`v3/cpp/asv3.cpp`](v3/cpp/asv3.cpp) → `./asv4`)**: A single-pass, pipe-safe, schema-free streaming compressor (ARM64 NEON + `libzstd 1.5.5`) for binary dumps, neural network weights (`.safetensors`), and mixed structured files.
-2. **HND3 (`phase3-v3.2`, [`cpp/hnd3.cpp`](cpp/hnd3.cpp) → `./hnd3`)**: A zero-dependency C++20 reversible 3D tensor codec for hyperspectral cubes (`i16`/`u16`/`i32`) combining complete-pivoted integer `LDU`-RKLT, arbitrary-shape 2D 5/3 integer lifting, 16-stripe band-parallel 32-bit rANS, 7-layer progressive bitplane coding, and blind 3D stride/spectral-axis recovery (`--blind`).
+1. **ASV4 (`v4.1`, [`v3/cpp/asv3.cpp`](v3/cpp/asv3.cpp) → `./asv4`)**: A single-pass, pipe-safe, schema-free lossless streaming compressor (ARM64 NEON + `libzstd 1.5.5`) for binary dumps, neural network weights (`.safetensors`), and mixed structured files.
+2. **HND3 / HND4 (`phase4-v4.0`, modular library [`include/hnd3.h`](include/hnd3.h) + `libhnd3.a` → `./hnd3`)**: A zero-dependency C++20/C99 reversible & guaranteed-$L_\infty$ near-lossless 3D tensor codec for hyperspectral cubes (`i16`/`u16`/`i32`) combining complete-pivoted integer `LDU`-RKLT, arbitrary-shape 2D 5/3 integer lifting, 16-stripe band-parallel 32-bit rANS, 7-layer progressive bitplane coding, streaming spatial tiling (`HND4 --tile-size T`) with random-access single-tile decode (`--tile TY,TX`), per-header & per-layer Castagnoli CRC32C (`--crc`), and blind 3D stride/spectral-axis recovery (`--blind`).
 
-> **Units, Hardware, & Scope**: Benchmarks ran on an **Apple M3 Max (16 logical CPUs, 128 GiB RAM, macOS 27.2.1, Apple Clang 16.0.0)**. In the **ASV4** section, file sizes and Peak RSS use **binary `MiB` (`2^20 B`)** (matching [`v3/REPORT_V4.md`](v3/REPORT_V4.md)) while throughput is in decimal `MB/s` (`10^6 B/s`). In the **HND3** section, all sizes, RSS, and throughputs use **decimal `MB` (`10^6 B`)** (matching [`PHASE3_REPORT.md`](PHASE3_REPORT.md)). GitHub Actions CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) builds and tests on both `ubuntu-latest` (`x86_64`) and `macos-latest` (`arm64`). Known limits: HND3 is 3D-only, holds full cubes in memory (`~17–22×` raw `i16` peak RSS; no tiling yet), has no guaranteed-$L_\infty$ near-lossless mode, and has not been benchmarked against CCSDS-123.0-B-2 (Issue 2).
+> **Units, Hardware, & Honest Scope**: Benchmarks ran on an **Apple M3 Max (16 logical CPUs, 128 GiB RAM, macOS 27.2.1, Apple Clang 16.0.0; Homebrew LLVM 23.1.6 for `libFuzzer + ASan + UBSan`)**. In the **ASV4** section, file sizes and Peak RSS use **binary `MiB` (`2^20 B`)** (matching [`v3/REPORT_V4.md`](v3/REPORT_V4.md)) while throughput is in decimal `MB/s` (`10^6 B/s`). In the **HND3/HND4** section, all sizes, RSS, and throughputs use **decimal `MB` (`10^6 B`)** (matching [`PHASE3_REPORT.md`](PHASE3_REPORT.md) and [`PHASE4_REPORT.md`](PHASE4_REPORT.md)). GitHub Actions CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) builds, tests (`ubuntu-latest` `x86_64` & `macos-latest` `arm64`), and runs `libFuzzer + ASan + UBSan` on both codecs. Known limits: HND3/HND4 is 3D-only; untiled `HND3` holds full cubes in memory (`~17–22×` raw `i16`, solved via `HND4 --tile-size 128` at `0.9×–1.7×` Decode RSS); and in guaranteed-$L_\infty$ near-lossless mode (`E ≥ 1`), closed-loop **CCSDS-123.0-B-2 (Hybrid)** beats HND4's open-loop pre-quantizer by `0.14–1.07 b/s` ([`PHASE4_REPORT.md`](PHASE4_REPORT.md) §3).
 
 ---
 
@@ -17,7 +17,7 @@ ASV4 discovers binary structure online without schemas or backward seeks, applie
   - **GPT-2 FP32 (`real_gpt2_f32.safetensors`, `522.7 MiB`)**: `394.91 MiB` (`−10.38%` vs. `zstd -19 --long=27`) at `211 MB/s` enc / `1,252 MB/s` dec (1T) vs. ZipNN 0.5.4 `397.59 MiB`, OpenZL `le32` `398.43 MiB`, Blosc2 `401.61 MiB`.
   - **SmolLM2-135M BF16 (`real_smollm2_bf16.safetensors`, `256.6 MiB`)**: `170.44 MiB` (`−15.09%` vs. `zstd -3 --long=27`) at `208 MB/s` enc / `927 MB/s` dec (1T) vs. ZipNN 0.5.4 `171.10 MiB`, Blosc2 `177.25 MiB`, OpenZL `bf16Decon` `178.68 MiB`.
   - **Hubble WFPC2 FITS (`real_hubble_eagle_f32.fits`, `29.5 MiB`)**: `15.28 MiB` (`−16.86%` vs. `zstd -19 --long=27`; supervised OpenZL `15.14 MiB`) at `146 MB/s` enc / `680 MB/s` dec.
-- **Anti-regression floor & bounds**: Worst-case overhead across all 5 negative/adversarial controls (`enwik9`, source `.tar`, Mach-O binaries, media, CSPRNG random) is `+0.0021%` (L3) / `+0.0028%` (L19). `L19 ≤ L3` on `16/16` datasets, `32/32` streaming SHA-256 PASS, `0.89×` avg / `2.06×` max Scoring Work Multiplier, `≤ 192 MiB` combined dual-stream zstd window ceiling (peak OS process RSS `≤ 286.8 MiB` decode / `≤ 312.9 MiB` encode), and UBSan-checked decoder bounds (10 crafted corrupt-stream tests; ASV4 has not been coverage-fuzzed).
+- **Anti-regression floor & bounds**: Worst-case overhead across all 5 negative/adversarial controls (`enwik9`, source `.tar`, Mach-O binaries, media, CSPRNG random) is `+0.0021%` (L3) / `+0.0028%` (L19). `L19 ≤ L3` on `16/16` datasets, `32/32` streaming SHA-256 PASS, `0.89×` avg / `2.06×` max Scoring Work Multiplier, `≤ 192 MiB` combined dual-stream zstd window ceiling (peak OS process RSS `≤ 286.8 MiB` decode / `≤ 312.9 MiB` encode), and **coverage-guided `libFuzzer + ASan + UBSan` verified** (`164,475` runs across all 7 transform IDs in [`fuzz/fuzz_asv4.cpp`](fuzz/fuzz_asv4.cpp), `0` crashes/errors/leaks).
 
 ---
 
@@ -75,20 +75,20 @@ See **[`ARCHITECTURE.md`](ARCHITECTURE.md)** for full Mermaid diagrams of the tw
 
 ---
 
-## Part 2: HND3 (`phase3-v3.2`) — Reversible 3D Hyperspectral Codec
+## Part 2: HND3 / HND4 (`phase4-v4.0`) — Reversible & Near-Lossless 3D Hyperspectral Codec
 
-**HND3** ([`cpp/hnd3.cpp`](cpp/hnd3.cpp) → `./hnd3`, wire-compatible with [`phase3_codec.py`](phase3_codec.py)) is a zero-dependency C++20 reversible 3D tensor codec featuring complete-pivoted `LDU`-RKLT (ARM64 NEON `vmlal_s32` for `i16`/`u16`, overflow-safe scalar `int64` + variable-width escape for full-range `i32`), arbitrary-shape 2D 5/3 integer lifting, 16-stripe parallel 3D-context 32-bit rANS, single-stream 7-layer progressive decoding (`base_k = 6`, supporting truncated layer prefixes), default-on encode-then-verify SHA-256 checking, and windowed native C++20 blind 3D shape recovery (`--blind`).
+**HND3 / HND4** ([`include/hnd3.h`](include/hnd3.h) + `libhnd3.a` → `./hnd3`, with `HND3 v3` wire-compatible with [`phase3_codec.py`](phase3_codec.py)) is a zero-dependency C++20/C99 3D tensor codec featuring complete-pivoted `LDU`-RKLT (ARM64 NEON `vmlal_s32` for `i16`/`u16`, overflow-hardened scalar `int64`/`__int128` + variable-width escape for full-range `i32`), arbitrary-shape 2D 5/3 integer lifting, 16-stripe parallel 3D-context 32-bit rANS, single-stream 7-layer progressive decoding (`base_k = 6`), **HND4 streaming spatial tiling (`--tile-size T`) with `O(B · T²)` bounded Peak RSS and random-access single-tile decoding (`--tile TY,TX`)**, **per-header & per-layer Castagnoli CRC32C (`--crc`, verifying even lossy previews)**, **guaranteed-$L_\infty$ near-lossless coding (`--max-error E`)**, default-on `--verify`, windowed native C++20 blind 3D shape recovery (`--blind`), and `libFuzzer + ASan + UBSan` verification (`81,785` runs in [`fuzz/fuzz_hnd3.cpp`](fuzz/fuzz_hnd3.cpp), `0` errors).
 
 ### Real Public Hyperspectral Cubes (Uncropped, Official References, Decimal `MB = 10⁶ B`, Best-of-3)
 
-| Uncropped Real Cube | Official `Empordà` CCSDS-123.0-B-1 (`P=3 / P=15` SA) | `LDU` + OpenJPEG J2K (`Dec 1T/MT`) | `LDU` + `cjxl 0.13` (`Dec MT`) | **HND3 `k=0` (`Dec 1T/MT`)** | **HND3 `k=6` (`Dec 1T/MT`)** | `k=6` Preview (`SAM_mean`) | `--blind` (`6/6` Perms) |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| **Indian Pines** `(200, 145, 145)`, `8.41 MB` | `6.579 / 6.545 b/s` | `6.739` (`22/167`) | `6.558` (`12`) | `6.485` (`70/205`) | `6.561` (`28/126`) | `16.4%` → `54.1 dB` (`0.32°`) | `6/6` exact |
-| **Salinas** `(204, 512, 217)`, `45.33 MB` | `4.881 / 4.864 b/s` | `4.803` (`22/63`) | **`4.043`** (`18`) | `4.657` (`38/157`) | `4.628` (`21/106`) | `3.4%` → `60.1 dB` (`0.34°`) | `6/6` exact |
-| **PaviaU** `(103, 610, 340)`, `42.72 MB` | `6.551 / 6.620 b/s` | `6.640` (`21/99`) | `6.558` (`33`) | `6.366` (`50/175`) | **`6.354`** (`26/125`) | `12.1%` → `52.9 dB` (`0.78°`) | `6/6` exact |
-| **AVIRIS Holdout** `(224, 745, 398)`, `132.84 MB` | `3.014 / 3.007 b/s` | `3.068` (`29/60`) | **`2.868`** (`19`) | `3.068` (`41/157`) | `2.940` (`23/116`) | `0.6%` → `55.3 dB` (`0.50°`) | `6/6` exact |
+| Uncropped Real Cube | Official `Empordà` CCSDS-123.0-B-1 (`P=3 / P=15` SA) | `LDU` + OpenJPEG J2K (`Dec 1T/MT`) | `LDU` + `cjxl 0.13` (`Dec MT`) | **HND3 `k=0` (`Dec 1T/MT`)** | **HND3 `k=6` (`Dec 1T/MT`)** | `HND4 tile=128` (`b/s` · **Dec RSS**) | `k=6` Preview (`SAM_mean`) | `--blind` (`6/6` Perms) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **Indian Pines** `(200, 145, 145)`, `8.41 MB` | `6.579 / 6.545 b/s` *(B2 Hyb: `6.577 / 6.544`)* | `6.739` (`22/167`) | `6.558` (`12`) | **`6.485`** (`70/205`) | `6.561` (`28/126`) | `6.734` · **`86 MB`** | `16.4%` → `54.1 dB` (`0.32°`) | `6/6` exact |
+| **Salinas** `(204, 512, 217)`, `45.33 MB` | `4.881 / 4.864 b/s` | `4.803` (`22/63`) | **`4.043`** (`18`) | `4.657` (`38/157`) | `4.628` (`21/106`) | `4.737` · **`104 MB`** (`7.3×↓`) | `3.4%` → `60.1 dB` (`0.34°`) | `6/6` exact |
+| **PaviaU** `(103, 610, 340)`, `42.72 MB` | `6.551 / 6.620 b/s` | `6.640` (`21/99`) | `6.558` (`33`) | `6.366` (`50/175`) | **`6.354`** (`26/125`) | `6.542` · **`62 MB`** (`11.5×↓`) | `12.1%` → `52.9 dB` (`0.78°`) | `6/6` exact |
+| **AVIRIS Holdout** `(224, 745, 398)`, `132.84 MB` | `3.014 / 3.007 b/s` | `3.068` (`29/60`) | **`2.868`** (`19`) | `3.068` (`41/157`) | `2.940` (`23/116`) | `3.119` (`k=6: 3.052`) · **`119 MB`** (`18.2×↓`) | `0.6%` → `55.3 dB` (`0.50°`) | `6/6` exact |
 
-*Reproduce all HND3 tables via `python3 bench/fetch_hnd3_data.py && make bench-hnd3`. See [`PHASE3_REPORT.md`](PHASE3_REPORT.md) for full 7-layer R-D curves (`k=6..0`, SAM, PSNR, $L_\infty$), discrete-entropy `LDU` rounding-noise audit, full-range `int32` (`±1.9e9`) verification, Peak RSS (`~17–22×` raw `i16`), and non-hyperspectral 3D controls (where `cjxl` beats HND3 on both microscopy and MRI).*
+*Reproduce all tables via `python3 bench/fetch_hnd3_data.py && make bench-hnd3` (and `python3 bench/bench_ccsds123_b2.py` for NTNU CCSDS-123.0-B-2). See [`PHASE4_REPORT.md`](PHASE4_REPORT.md) for HND4 tiled Peak RSS (`18.2×` Decode RSS reduction on AVIRIS, `43–106 ms` single-tile random access), guaranteed-$L_\infty$ near-lossless R-D vs. **NTNU CCSDS-123.0-B-2 (Hybrid)** (where HND4 beats Issue 2 lossless on full Indian Pines `6.485 vs 6.544 b/s`, while Issue 2's closed-loop quantizer beats HND4 by `0.14–1.07 b/s` at `E=1..4`), and `libFuzzer + ASan + UBSan` results. See [`PHASE3_REPORT.md`](PHASE3_REPORT.md) for 7-layer R-D curves, discrete-entropy `LDU` audit, full-range `int32` (`±1.9e9`), and non-hyperspectral controls.*
 
 ---
 
@@ -98,11 +98,14 @@ See **[`ARCHITECTURE.md`](ARCHITECTURE.md)** for full Mermaid diagrams of the tw
 Requires a C++20 compiler (`clang++` or `g++`) and `libzstd` (`>= 1.5` for `./asv4`; `./hnd2` and `./hnd3` have **zero external dependencies**). The top-level [`Makefile`](Makefile) auto-detects Homebrew, Conda, or system `libzstd` paths and builds `./asv4` (from [`v3/cpp/asv3.cpp`](v3/cpp/asv3.cpp)), `./hnd2`, and `./hnd3`.
 
 ```bash
-# Build all C++20 binaries (./asv4, v3/cpp/asv3, ./hnd2, ./hnd3)
+# Build all C++20 targets (./asv4, v3/cpp/asv3, ./hnd2, libhnd3.a, ./hnd3)
 make
 
-# Run UBSan + portable SHA-256 + NEON/scalar parity + 2,000-iter libc++ debug fuzz + Py↔C++ interop tests
+# Run UBSan + portable SHA-256 + NEON/scalar parity + C99 ABI + 5k libc++ debug fuzz + Phase 1-4 suites
 make test
+
+# Build coverage-guided libFuzzer + ASan + UBSan harnesses (/tmp/fuzz_hnd3, /tmp/fuzz_asv4)
+make fuzz
 ```
 
 ### Usage: ASV4 (Files or Unix Pipes)
@@ -118,14 +121,23 @@ cat model.safetensors | ./asv4 c --level 3 | ./asv4 d > /dev/null
 ./asv4 c --level 19 --stats stats.json --trace input.bin output.asv4
 ```
 
-### Usage: HND3 (3D Hyperspectral & Scientific Tensors)
+### Usage: HND3 / HND4 (3D Hyperspectral & Scientific Tensors)
 ```bash
-# Encode & decode a 3D hyperspectral cube (7-layer quality-embedded lossless .hnd3)
+# 1) Untiled 7-layer quality-embedded lossless HND3
 ./hnd3 enc cube.raw cube.hnd3 --shape 204,512,217 --dtype i16 --base-k 6
 ./hnd3 dec cube.hnd3 cube_lossless.raw              # Full bit-exact decode + SHA-256 check
-./hnd3 dec cube.hnd3 preview.raw --stop-layer 6     # Instant 60.1 dB base preview (3.4% of stream, ~328 MB/s)
+./hnd3 dec cube.hnd3 preview.raw --stop-layer 6     # Instant 60.1 dB base preview (3.4% of stream)
 
-# Pure C++20 blind mode (zero shape hints, automatic 6/6 stride & spectral-axis discovery)
+# 2) HND4 streaming spatial tiling (bounded O(B*T^2) Peak RSS + per-layer CRC32C + random access)
+./hnd3 enc aviris.raw aviris.hnd4 --shape 224,745,398 --dtype i16 --base-k 6 --tile-size 128
+./hnd3 dec aviris.hnd4 aviris_rec.raw               # Streaming decode (119 MB Peak RSS, SHA256+CRC32C=PASS)
+./hnd3 dec aviris.hnd4 tile11.raw --tile 1,1        # Random-access single-tile lossless decode (~106 ms)
+./hnd3 dec aviris.hnd4 prev11.raw --tile 1,1 --stop-layer 6  # Verified CRC32C preview of one tile (~75 ms)
+
+# 3) Guaranteed-L_inf near-lossless mode (|x - x_hat| <= 2 on every sample, verified on encode)
+./hnd3 enc aviris.raw aviris_e2.hnd4 --shape 224,745,398 --dtype i16 --tile-size 256 --max-error 2
+
+# 4) Pure C++20 blind mode (zero shape hints, automatic 6/6 stride & spectral-axis discovery)
 ./hnd3 enc headerless.raw blind.hnd3 --blind --dtype i16 --base-k 0
 ./hnd3 dec blind.hnd3 restored.raw
 ```
@@ -152,16 +164,17 @@ python3 v3/bench_final_refresh.py
 
 | Path | Description |
 |---|---|
-| [`bench/fetch_hnd3_data.py`](bench/fetch_hnd3_data.py), [`bench/bench_hnd3.py`](bench/bench_hnd3.py) | Reproducible HND3 dataset SHA-256 fetcher & full benchmark suite (`make bench-hnd3`) |
-| [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Multi-platform GitHub Actions CI (`ubuntu-latest` x86_64 & `macos-latest` arm64) |
-| [`Makefile`](Makefile) | Auto-detecting C++20 build (`make`, `make bench`, `make bench-hnd3`, `make test`) |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | System architecture & Mermaid diagrams for both ASV4 v4.1 and HND3 (Phases 0–3) |
-| [`cpp/hnd3.cpp`](cpp/hnd3.cpp) | **Phase 3 zero-dependency C++20 NEON HND3 engine** (16-stripe rANS, `vmlal_s32` LDU, native `--blind`) |
+| [`include/hnd3.h`](include/hnd3.h), [`cpp/hnd3_core.hpp`](cpp/hnd3_core.hpp), [`cpp/hnd3_rans.hpp`](cpp/hnd3_rans.hpp), [`cpp/hnd3_lib.cpp`](cpp/hnd3_lib.cpp), [`cpp/hnd3_cli.cpp`](cpp/hnd3_cli.cpp) | **Phase 4 modular zero-dependency C++20/C99 HND3/HND4 library (`libhnd3.a`) & CLI (`./hnd3`)** (streaming tiling, CRC32C, near-lossless, C ABI, native `--blind`) |
+| [`fuzz/fuzz_hnd3.cpp`](fuzz/fuzz_hnd3.cpp), [`fuzz/fuzz_asv4.cpp`](fuzz/fuzz_asv4.cpp) | Coverage-guided `libFuzzer + ASan + UBSan` targets for HND3/HND4 and ASV4 (`make fuzz`) |
+| [`bench/fetch_hnd3_data.py`](bench/fetch_hnd3_data.py), [`bench/bench_hnd3.py`](bench/bench_hnd3.py), [`bench/bench_ccsds123_b2.py`](bench/bench_ccsds123_b2.py) | Reproducible SHA-256 dataset fetcher, full benchmark suite (`make bench-hnd3`), & NTNU CCSDS-123.0-B-2 comparison |
+| [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Multi-platform GitHub Actions CI (`ubuntu-latest` x86_64, `macos-latest` arm64, + `libFuzzer + ASan + UBSan`) |
+| [`Makefile`](Makefile) | Auto-detecting C++20 build (`make`, `make libhnd3`, `make bench`, `make bench-hnd3`, `make test`, `make fuzz`) |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | System architecture & Mermaid diagrams for ASV4 v4.1 and HND3/HND4 (Phases 0–4) |
 | [`cpp/hnd2.cpp`](cpp/hnd2.cpp) | Phase 2 C++20 NEON HND2 engine (7-layer quality-embedded lossless) |
 | [`phase3_codec.py`](phase3_codec.py), [`phase2_codec.py`](phase2_codec.py), [`phase1_codec.py`](phase1_codec.py) | Wire-compatible Python+Numba reference codecs for Phases 1–3 |
 | [`phase0_harness.py`](phase0_harness.py) | Phase 0 falsification harness v2.2 (Blue Book CCSDS-123, real Rice, Gates 0A–0D, Track B) |
-| [`test_phase0.py`](test_phase0.py), [`test_phase1.py`](test_phase1.py), [`test_phase2.py`](test_phase2.py), [`test_phase3.py`](test_phase3.py) | Automated verification suites (transforms, CCSDS-123, blind strides, Py↔C++ cross-interop) |
-| [`PHASE0_REPORT.md`](PHASE0_REPORT.md), [`PHASE1_REPORT.md`](PHASE1_REPORT.md), [`PHASE2_REPORT.md`](PHASE2_REPORT.md), [`PHASE3_REPORT.md`](PHASE3_REPORT.md) | Staged empirical falsification & real-cube benchmark reports (Phases 0–3) |
+| [`test_phase0.py`](test_phase0.py) .. [`test_phase4.py`](test_phase4.py) | Automated verification suites (transforms, CCSDS-123, blind strides, Py↔C++ interop, HND4 tiling/CRC/near-lossless/C ABI) |
+| [`PHASE0_REPORT.md`](PHASE0_REPORT.md) .. [`PHASE4_REPORT.md`](PHASE4_REPORT.md) | Staged empirical falsification & real-cube benchmark reports (Phases 0–4) |
 | [`v3/cpp/asv3.cpp`](v3/cpp/asv3.cpp) | **Production C++20 NEON ASV4 v4.1 streaming encoder & hardened decoder** |
 | [`v3/cpp/asv3_v3.0.cpp`](v3/cpp/asv3_v3.0.cpp) | Frozen `v3.0` C++20 NEON reference snapshot |
 | [`v3/cpp/zstd_capi_bench.cpp`](v3/cpp/zstd_capi_bench.cpp) | Exact in-process single-threaded `libzstd` C API baseline harness (`B2_capi` / `B3a_capi`) |
@@ -191,7 +204,7 @@ python3 v3/bench_final_refresh.py
 - **J. Duda (2009 / 2013)**, *Asymmetric Numeral Systems*, arXiv:0902.0271 / arXiv:1311.2540 (32-bit rANS entropy coding).
 - **A. de Cheveigné & H. Kawahara (2002)**, *YIN, a Fundamental Frequency Estimator for Speech and Music*, J. Acoust. Soc. Am. (rectified fundamental stride selection).
 - **CCSDS 123.0-B-1 / 123.0-B-2**, *Low-Complexity Lossless and Near-Lossless Multispectral and Hyperspectral Image Compression*, Consultative Committee for Space Data Systems.
-- **External reference implementations benchmarked**: `libzstd` (Meta), `OpenZL`, `Blosc2`, `ZipNN`, UAB/ESA `Empordà` (CCSDS-123.0-B-1), `OpenJPEG`, `libjxl` (`cjxl`/`djxl` 0.13.0), `CharLS`, and `ZFP`.
+- **External reference implementations benchmarked**: `libzstd` (Meta), `OpenZL`, `Blosc2`, `ZipNN`, UAB/ESA `Empordà` (CCSDS-123.0-B-1), NTNU SmallSat Lab CCSDS-123.0-B-2 High-Level Verification Model (Vorhaug, Boyle, & Orlandić, WHISPERS 2024), `OpenJPEG`, `libjxl` (`cjxl`/`djxl` 0.13.0), `CharLS`, and `ZFP`.
 
 ### Public Datasets
 - **Hyperspectral cubes**: Purdue University / NASA AVIRIS *Indian Pines*, NASA/JPL AVIRIS *Salinas*, University of Pavia ROSIS *Pavia University*, and NASA AVIRIS holdout scene via HuggingFace `danjacobellis/aviris_1k_val`.

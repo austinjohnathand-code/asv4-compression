@@ -194,9 +194,9 @@ sequenceDiagram
 
 ---
 
-## 6. HND3: Reversible 3D Hyperspectral Tensor Architecture (Phases 0–3)
+## 6. HND3 / HND4: Reversible 3D Hyperspectral Tensor Architecture (Phases 0–4)
 
-Alongside ASV4's 1D/record streaming engine, **HND3 (`phase3-v3.2`, [`cpp/hnd3.cpp`](cpp/hnd3.cpp))** is a zero-dependency C++20 reversible 3D tensor codec (wire-compatible with [`phase3_codec.py`](phase3_codec.py), with bit-exact ARM64 NEON ↔ `-DHND3_FORCE_SCALAR` parity and variable-width escape coding supporting full-range `int32` inputs up to `|v| < 2^62`). It was developed across `Indian Pines`, `Salinas`, and `Pavia University`, and validated out-of-sample on a `132.84 MB` 224-band NASA AVIRIS scene plus non-hyperspectral 3D microscopy and MRI controls.
+Alongside ASV4's 1D/record streaming engine, **HND3/HND4 (`phase4-v4.0`, modular library [`include/hnd3.h`](include/hnd3.h) + [`cpp/hnd3_core.hpp`](cpp/hnd3_core.hpp) + [`cpp/hnd3_rans.hpp`](cpp/hnd3_rans.hpp) + [`cpp/hnd3_lib.cpp`](cpp/hnd3_lib.cpp) → `libhnd3.a`, thin CLI [`cpp/hnd3_cli.cpp`](cpp/hnd3_cli.cpp) → `./hnd3`)** is a zero-dependency C++20/C99 reversible and near-lossless 3D tensor codec. It preserves 100% wire compatibility with HND3 v3 ([`phase3_codec.py`](phase3_codec.py)) while adding the **HND4 v4** tiled streaming container (`--tile-size T`), random-access single-tile decode (`dec --tile TY,TX`), per-header & per-layer Castagnoli CRC32C (`--crc`, verifying even lossy progressive previews), guaranteed-$L_\infty$ near-lossless coding (`--max-error E`), and an `extern "C"` FFI ABI. Both `HND3`/`HND4` and `ASV4` have coverage-guided `libFuzzer + ASan + UBSan` targets ([`fuzz/fuzz_hnd3.cpp`](fuzz/fuzz_hnd3.cpp), [`fuzz/fuzz_asv4.cpp`](fuzz/fuzz_asv4.cpp)).
 
 ### 6.1 End-to-End HND3 Pipeline (Explicit & Native C++20 Blind Track A)
 
@@ -270,6 +270,30 @@ flowchart TD
     NEXT -->|"Done"| OUT["Recovered Stride Chain [1, s1, s2, ...]"]
 ```
 
+### 6.4 HND4 (`phase4-v4.0`) Streaming Tiled Container, Per-Layer CRC32C, & Near-Lossless Mode
+
+```mermaid
+flowchart LR
+    subgraph HND4["HND4 Container (84 B Header + Shared LDU + Tile Index)"]
+        H4["84 B Header: magic='HND4', ver=4, flags(TILED|CRC32C|NL), tile_h/w, grid, max_err, SHA-256, hdr_crc32c"]
+        SP4["Shared Global LDU-RKLT Model (sampled via ≤16,384 strided pixels, <16 MB RAM)"]
+        IDX["Tile Index Table (N_tiles × 140 B): offset(u64), tile_bytes(u32), layer_bytes[16], layer_crc32c[16]"]
+        H4 --> SP4 --> IDX
+    end
+
+    subgraph Tiles["Independently Seekable Spatial Tiles (Streaming O(B · T²) Peak RSS)"]
+        T0["Tile (0,0): Layer k=base_k (CRC32C) → k=base_k-1 (CRC32C) → ... → k=0 (CRC32C)"]
+        TN["Tile (ty,tx): Direct seekg() for random-access dec --tile ty,tx (--stop-layer K)"]
+    end
+
+    HND4 --> Tiles
+```
+
+- **Bounded streaming Peak RSS**: `hnd3::encode_file` computes ONE shared global `LDU`-RKLT model by strided file sampling (`≤ 16,384` spatial pixels), then reads, transforms, encodes, optionally verifies, writes, and frees one spatial tile `(B, th, tw)` at a time (`O(B · T²)` RAM instead of `O(B · H · W)`). On the `132.84 MB` AVIRIS holdout (`224×745×398`), `--tile-size 128` cuts Peak Encode RSS by **13.0×** (`2,979 → 229 MB`) and Peak Decode RSS by **18.2×** (`2,169 → 119 MB`, `0.90×` raw file size) at `+0.051 b/s` (`k=0`).
+- **Per-header & per-layer Castagnoli CRC32C (`0x82F63B78`)**: `header_crc` protects the 84 B header, shared `LDU` model, and entire Tile Index Table; `layer_crc[k]` independently verifies every quality layer of every tile, enabling corruption detection even on lossy progressive previews (`--stop-layer K`) and single-tile random-access decodes (`--tile TY,TX`).
+- **Guaranteed-$L_\infty$ near-lossless (`--max-error E`)**: Uniform centered sample-domain quantizer (`q = sign(x) · floor((|x| + E) / (2E + 1))`, `x_hat = clamp(q · (2E + 1), dtype_min, dtype_max)`) mathematically guarantees `|x - x_hat| ≤ E` for every sample across `i16`, `u16`, and `i32` (including dtype min/max extremes, verified by default-on `--verify`). Because quantization sits *outside* the reversible integer `LDU`-RKLT + 5/3 pipeline, integer lifting rounding noise imposes a bitrate floor relative to closed-loop in-loop quantization in CCSDS-123.0-B-2 (`PHASE4_REPORT.md` §3).
+- **Modular library & C99 FFI**: `libhnd3.a` + [`include/hnd3.h`](include/hnd3.h) expose `hnd3::encode`, `hnd3::decode`, `hnd3::encode_file`, `hnd3::decode_file`, `hnd3::inspect`, `hnd3::crc32c`, plus `extern "C"` `hnd3_encode_buffer`, `hnd3_decode_buffer`, `hnd3_free`. All integer lifting, rANS activity/shift, and dequantization arithmetic is overflow-hardened with `__int128` and unsigned wrapping helpers, verified under LLVM 23.1.6 `libFuzzer + ASan + UBSan`.
+
 ---
 
 ## 7. Evolutionary History (Falsification Record)
@@ -280,9 +304,10 @@ flowchart TD
 | **v3 Phase 0 & 1A** | Coupled Stage 1 & 2 (`codec.py`) + `ASV3` container | **PASS** — 100% SHA-256, pipe-safe, `≤ +0.002%` worst-case tax |
 | **v3 Phase 1B** | Stage 3 bounded delta forest (`stage3_forest.py`) | **CUT PERMANENTLY** — regressed `+11.80%` on snapshots, `+3.03%` on binaries |
 | **v3.0 (`asv3_v3.0.cpp`)** | C++20 NEON port, UBSan bounds checks, fast-confirm, tiled `T2_BIT`, portable SHA-256 | **RELEASED** — `−7.05%` GPT-2, `−15.45%` Hubble FITS, `≤ +0.0028%` tax, `0.83×` Work Mult |
-| **v4.0** | `T2_NIBROT` (`w=4,8`) NEON, per-plane `zstd -1/-3` scoring, combined-gain gate | Surpassed OpenZL `le32` on GPT-2 (`394.91 MB`, `1,285 MB/s` dec), `−16.86%` Hubble FITS |
-| **`v4.1` (`asv3.cpp`)** | `T2_NIBROT(2)` NEON for BF16, monotonic L19 cap, `T3_2D` encoder retirement | **RELEASED** — Beats OpenZL, Blosc2 & ZipNN on GPT-2 FP32 (`394.91 MB`) & SmolLM2 BF16 (`170.44 MB`), `16/16` monotonic `L19 ≤ L3`, `0.89×` Work Mult |
+| **v4.0** | `T2_NIBROT` (`w=4,8`) NEON, per-plane `zstd -1/-3` scoring, combined-gain gate | Surpassed OpenZL `le32` on GPT-2 (`394.91 MiB`, `1,285 MB/s` dec), `−16.86%` Hubble FITS |
+| **`v4.1` (`asv3.cpp`)** | `T2_NIBROT(2)` NEON for BF16, monotonic L19 cap, `T3_2D` encoder retirement | **RELEASED** — Beats OpenZL, Blosc2 & ZipNN on GPT-2 FP32 (`394.91 MiB`) & SmolLM2 BF16 (`170.44 MiB`), `16/16` monotonic `L19 ≤ L3`, `0.89×` Work Mult |
 | **`phase0-v2.2`** | Hyperspectral N-D falsification harness, exact Blue Book CCSDS-123 (`P=3/15`), real Rice coder, 14-test suite | **PASS** — Killed folded spatial KLT (`0A`), passed `R6` (`0B`), passed 48/48 blind stride recovery (`0D`) |
-| **`phase1-v1.0`** | Gate 1A (`R6` = 91–97% variance heteroscedasticity), complete-pivoted `LDU`-RKLT, 3D-context 32-bit rANS, $L_2$-weighted Track B (`.hnd1`) | **PASS** — Beats Blue Book CCSDS-123 on real cubes (`6.427 / 4.714 / 6.441 b/s`), `99.4×` @ `59.8 dB` on Salinas |
-| **`phase2-v2.0`** | Unified 7-layer quality-embedded `.hnd2` + zero-dependency C++20 NEON engine (`./hnd2`) | **PASS** — `53–60 dB` base preview from single lossless file, `92–135 MB/s` dec, UBSan + Py↔C++ verified |
-| **`phase3-v3.0`** | 16-stripe parallel rANS + true NEON `vmlal_s32` FMA + 64-bit EB + native C++20 `--blind` FFT (`./hnd3`) | **CURRENT** — 7-layer embedded beats one-shot & float KLT (`4.628 b/s` Salinas `+9.1%` vs CCSDS-123, `6.354 b/s` PaviaU `+7.1%`), up to `220 MB/s` lossless / `565 MB/s` preview dec, UBSan + Py↔C++ verified |
+| **`phase1-v1.0`** | Gate 1A (`R6` = 91–97% variance heteroscedasticity), complete-pivoted `LDU`-RKLT, 3D-context 32-bit rANS, $L_2$-weighted Track B (`.hnd1`) | **PASS** — Complete-pivoted `LDU`-RKLT + 3D-context rANS prototype (`.hnd1`) |
+| **`phase2-v2.0`** | Unified 7-layer quality-embedded `.hnd2` + zero-dependency C++20 NEON engine (`./hnd2`) | **PASS** — `53–60 dB` base preview from single lossless file, UBSan + Py↔C++ verified |
+| **`phase3-v3.2`** | 16-stripe parallel rANS, NEON `vmlal_s32` LDU, full-range `i32` variable escape, official `Empordà`/`cjxl`/OpenJPEG baselines, CI, SHA-256 dataset fetcher | **PASS** — Beats `Empordà` CCSDS-123.0-B-1 on 3/4 uncropped scenes (`6.485 / 4.628 / 6.354 b/s`), `6/6` `--blind` exact recovery on all 4 scenes |
+| **`phase4-v4.0`** | Modular `libhnd3.a` + C99 ABI, `HND4` streaming spatial tiling, random-access tiles, per-header/layer CRC32C, guaranteed-$L_\infty$ near-lossless, CCSDS-123.0-B-2 benchmark, real `libFuzzer+ASan+UBSan` on `HND3`/`HND4` & `ASV4` | **CURRENT** — **18.2×** lower Decode RSS on AVIRIS (`2,169 → 119 MB`), `43–106 ms` 1-tile random access, verified preview CRC32C, `246k+` combined `libFuzzer+ASan+UBSan` runs (`0` crashes after fixing 1 LDU overflow UB) |
