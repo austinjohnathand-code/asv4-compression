@@ -1,0 +1,82 @@
+[
+  {
+    "name": "target_numeric_f32.bin",
+    "category": "target",
+    "bytes": 268435456,
+    "mb": 256.0,
+    "sha256": "dbe95264bb9d399491db2984295906cdbb73b7e3adb8c79733dcb6a35bb75f7a",
+    "oracle_hint": "f32_le_transpose_xor"
+  },
+  {
+    "name": "target_struct64.bin",
+    "category": "target",
+    "bytes": 268435456,
+    "mb": 256.0,
+    "sha256": "d778811b1a5ce39d1a02be481c92c1baeb7474eafbc78612e54aac55d6c053dc",
+    "oracle_hint": "struct64_transpose_xor"
+  },
+  {
+    "name": "target_sqlite.db",
+    "category": "target",
+    "bytes": 326471680,
+    "mb": 311.35,
+    "sha256": "656984234bbd1f92e1e3b468bac12dbcdc2e4ff9bc0601322daa0a6418096a1c",
+    "oracle_hint": "sqlite_page4096"
+  },
+  {
+    "name": "target_mixed_structured.bin",
+    "category": "target_mixed",
+    "bytes": 268435456,
+    "mb": 256.0,
+    "sha256": "6a4423814bb029686bf48046a41066116daf4966abe929c3f7d88e5ad631653b",
+    "oracle_hint": "mixed_oracle"
+  },
+  {
+    "name": "target_snapshots.bin",
+    "category": "target_snapshot",
+    "bytes": 268435456,
+    "mb": 256.0,
+    "sha256": "5c5fdaf27e143a3775a514a2e478f7b4529e306d1e6dd02de7aa2bebf2d36a65",
+    "oracle_hint": "snapshot_delta"
+  },
+  {
+    "name": "neg_enwik9.xml",
+    "category": "negative",
+    "bytes": 1000000000,
+    "mb": 953.67,
+    "sha256": "159b85351e5f76e60cbe32e04c677847a9ecba3adc79addab6f4c6c7aa3744bc",
+    "oracle_hint": "identity"
+  },
+  {
+    "name": "neg_source_tar.tar",
+    "category": "negative",
+    "bytes": 286504960,
+    "mb": 273.23,
+    "sha256": "8fd0335ea32f219491079acef200de79e7e025144004c36d193ca63d3f791043",
+    "oracle_hint": "identity"
+  },
+  {
+    "name": "adv_binaries.bin",
+    "category": "adversarial",
+    "bytes": 167772160,
+    "mb": 160.0,
+    "sha256": "cc829994f5974fa524228f92fc8534ed3c8e8c66812cd979ca1fbe6dc20ca114",
+    "oracle_hint": "identity"
+  },
+  {
+    "name": "adv_compressed_media.tar",
+    "category": "adversarial",
+    "bytes": 132106240,
+    "mb": 125.99,
+    "sha256": "6e4af9f58cbac95fb1e2df5b8c871bccf835126eaa8efb4297b7a13dc65e2b3f",
+    "oracle_hint": "identity"
+  },
+  {
+    "name": "adv_random.bin",
+    "category": "adversarial",
+    "bytes": 67108864,
+    "mb": 64.0,
+    "sha256": "2344ea370a00bb92f1abb999b4c827017c14b77116d88326392e28d8dc3101be",
+    "oracle_hint": "identity"
+  }
+]

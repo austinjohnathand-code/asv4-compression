@@ -1,0 +1,20 @@
+[
+  {
+    "block_mb": 1,
+    "comp_bytes": 83618811,
+    "s_meta_bytes": 305,
+    "regions": 8
+  },
+  {
+    "block_mb": 4,
+    "comp_bytes": 83183019,
+    "s_meta_bytes": 277,
+    "regions": 8
+  },
+  {
+    "block_mb": 16,
+    "comp_bytes": 82730919,
+    "s_meta_bytes": 244,
+    "regions": 8
+  }
+]

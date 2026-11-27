@@ -1,0 +1,184 @@
+{
+  "neg_enwik9.xml::O1": [
+    null,
+    "T0"
+  ],
+  "neg_enwik9.xml::A0": [
+    null,
+    "T0"
+  ],
+  "neg_enwik9.xml::B5_openzl": [
+    286515026,
+    "serial"
+  ],
+  "neg_enwik9.xml::B6_blosc2": [
+    557470021,
+    "shuffle4"
+  ],
+  "neg_source_tar.tar::O1": [
+    null,
+    "T0"
+  ],
+  "neg_source_tar.tar::A1": [
+    null,
+    "xform=0/69"
+  ],
+  "neg_enwik9.xml::A1": [
+    null,
+    "xform=0/239"
+  ],
+  "neg_enwik9.xml::B1_lz4": 509454838,
+  "neg_enwik9.xml::B2_zstd3": 312548982,
+  "adv_random.bin::B5_openzl": [
+    67108968,
+    "serial"
+  ],
+  "adv_random.bin::B6_blosc2": [
+    67108992,
+    "shuffle4"
+  ],
+  "adv_random.bin::A0": [
+    null,
+    "T0"
+  ],
+  "adv_random.bin::B2_zstd3": 67110413,
+  "adv_random.bin::B1_lz4": 67108943,
+  "adv_compressed_media.tar::B5_openzl": [
+    125675419,
+    "serial"
+  ],
+  "adv_compressed_media.tar::B6_blosc2": [
+    129760459,
+    "shuffle4"
+  ],
+  "adv_compressed_media.tar::A0": [
+    null,
+    "T0"
+  ],
+  "adv_compressed_media.tar::B2_zstd3": 125957734,
+  "adv_compressed_media.tar::B1_lz4": 129236675,
+  "adv_binaries.bin::B5_openzl": [
+    39099018,
+    "serial"
+  ],
+  "adv_binaries.bin::B6_blosc2": [
+    56815503,
+    "shuffle4"
+  ],
+  "adv_binaries.bin::A0": [
+    null,
+    "T0"
+  ],
+  "adv_binaries.bin::B2_zstd3": 41672108,
+  "adv_binaries.bin::B1_lz4": 69886192,
+  "adv_random.bin::B4a_xz6": 67112148,
+  "adv_random.bin::B3a_zstd19_l27": 67110413,
+  "adv_random.bin::O1": [
+    null,
+    "T0"
+  ],
+  "adv_random.bin::A1": [
+    null,
+    "xform=0/16"
+  ],
+  "adv_random.bin::B3b_zstd19_l31": 67110413,
+  "target_mixed_structured.bin::B2_zstd3": 145915598,
+  "target_mixed_structured.bin::B5_openzl": [
+    140988168,
+    "serial"
+  ],
+  "target_mixed_structured.bin::B6_blosc2": [
+    125082546,
+    "shuffle4"
+  ],
+  "target_mixed_structured.bin::B1_lz4": 195271623,
+  "adv_random.bin::B4b_xz_pb2": 67112148,
+  "target_snapshots.bin::B2_zstd3": 268441613,
+  "target_snapshots.bin::B5_openzl": [
+    268435872,
+    "serial"
+  ],
+  "target_snapshots.bin::B6_blosc2": [
+    268435968,
+    "shuffle4"
+  ],
+  "target_snapshots.bin::A0": [
+    null,
+    "T0"
+  ],
+  "target_snapshots.bin::B1_lz4": 268435727,
+  "neg_source_tar.tar::B2_zstd3": 39535044,
+  "neg_source_tar.tar::B5_openzl": [
+    34579535,
+    "serial"
+  ],
+  "neg_source_tar.tar::B6_blosc2": [
+    113981031,
+    "shuffle4"
+  ],
+  "neg_source_tar.tar::A0": [
+    null,
+    "T0"
+  ],
+  "neg_source_tar.tar::B1_lz4": 74474067,
+  "adv_compressed_media.tar::B3a_zstd19_l27": 109316924,
+  "adv_compressed_media.tar::B3b_zstd19_l31": 109317025,
+  "adv_compressed_media.tar::B4a_xz6": 116600372,
+  "adv_compressed_media.tar::O1": [
+    null,
+    "T0"
+  ],
+  "adv_compressed_media.tar::A1": [
+    null,
+    "xform=0/32"
+  ],
+  "adv_compressed_media.tar::B4b_xz_pb2": 116629608,
+  "adv_binaries.bin::B3a_zstd19_l27": 15225938,
+  "adv_binaries.bin::B3b_zstd19_l31": 15223666,
+  "adv_binaries.bin::B4a_xz6": 22466824,
+  "adv_binaries.bin::O1": [
+    null,
+    "T0"
+  ],
+  "adv_binaries.bin::B4b_xz_pb2": 22265636,
+  "target_mixed_structured.bin::A0": [
+    111990779,
+    "T2_XOR(4)"
+  ],
+  "adv_binaries.bin::A1": [
+    25751229,
+    "xform=7/40"
+  ],
+  "target_mixed_structured.bin::B3a_zstd19_l27": 109859026,
+  "target_mixed_structured.bin::B4a_xz6": 83678904,
+  "target_mixed_structured.bin::B3b_zstd19_l31": 109858642,
+  "target_mixed_structured.bin::B4b_xz_pb2": 83473456,
+  "target_snapshots.bin::B3a_zstd19_l27": 73858384,
+  "target_mixed_structured.bin::A1": [
+    82279744,
+    "xform=45/64"
+  ],
+  "target_snapshots.bin::B3b_zstd19_l31": 73845767,
+  "target_snapshots.bin::B4a_xz6": 268448276,
+  "target_snapshots.bin::B4b_xz_pb2": 268448276,
+  "target_snapshots.bin::A1": [
+    null,
+    "xform=0/64"
+  ],
+  "target_mixed_structured.bin::O1": [
+    73613700,
+    "mixed_true_oracle"
+  ],
+  "neg_source_tar.tar::B3a_zstd19_l27": 27070880,
+  "neg_source_tar.tar::B3b_zstd19_l31": 27017602,
+  "neg_source_tar.tar::B4a_xz6": 27894396,
+  "neg_source_tar.tar::B4b_xz_pb2": 27991956,
+  "target_snapshots.bin::O1": [
+    40588031,
+    "oracle_sub_32MB"
+  ],
+  "neg_enwik9.xml::B4a_xz6": 233403104,
+  "neg_enwik9.xml::B4b_xz_pb2": 233996432,
+  "neg_enwik9.xml::B3a_zstd19_l27": 230825074,
+  "neg_enwik9.xml::B3b_zstd19_l31": 230087842
+}
