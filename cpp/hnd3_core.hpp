@@ -2,6 +2,7 @@
 #include "hnd3.h"
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -49,6 +50,8 @@ static constexpr uint64_t RANS_L    = 1ULL << 16;
 static constexpr int      N_SYMS    = 32;
 static constexpr int      N_CTXS    = 16;
 static constexpr size_t   HDR_SIZE  = 62;
+
+static_assert(std::endian::native == std::endian::little, "HND3/HND4 requires a little-endian host");
 
 template <typename T>
 inline T read_le(const uint8_t* p) {
@@ -583,6 +586,15 @@ static LduStage complete_pivoted_ldu(const std::vector<double>& A_in, const std:
                 std::swap(cp[k], cp[bq]); swaps++;
             }
             double piv = Wm[k * M + k];
+            if (!std::isfinite(piv) || std::abs(piv) < 1e-12) {
+                // Degenerate/singular fallback: set remaining block to identity so LDU stays finite & bijective
+                for (int i = k; i < M; ++i) {
+                    d[i] = 1.0;
+                    for (int j = k; j < i; ++j) L[i * M + j] = 0.0;
+                    for (int j = i + 1; j < M; ++j) U[i * M + j] = 0.0;
+                }
+                break;
+            }
             d[k] = piv;
             if (k + 1 < M) {
                 for (int i = k + 1; i < M; ++i) L[i * M + k] = Wm[i * M + k] / piv;
@@ -609,8 +621,8 @@ static LduStage complete_pivoted_ldu(const std::vector<double>& A_in, const std:
     std::vector<double> d_abs(M), log_d(M);
     for (int i = 0; i < M; ++i) {
         st.dsgn[i] = (d[i] >= 0.0) ? 1 : -1;
-        d_abs[i] = std::abs(d[i]);
-        log_d[i] = std::log(std::max(d_abs[i], 1e-15));
+        d_abs[i] = std::max(std::abs(d[i]), 1e-12);
+        log_d[i] = std::log(d_abs[i]);
     }
     std::vector<uint8_t> used(M, 0);
     st.dperm.resize(M);
@@ -627,8 +639,14 @@ static LduStage complete_pivoted_ldu(const std::vector<double>& A_in, const std:
     st.Lq.assign(static_cast<size_t>(M) * M, 0);
     st.Uq.assign(static_cast<size_t>(M) * M, 0);
     auto clamp_i16 = [](double v) -> int16_t {
-        long long q = std::llround(v * static_cast<double>(LDU_SCALE));
+        if (!std::isfinite(v)) return 0;
+        long long q = std::llround(std::clamp(v * static_cast<double>(LDU_SCALE), -32767.0, 32767.0));
         return static_cast<int16_t>(std::clamp<long long>(q, -32767, 32767));
+    };
+    auto clamp_i32 = [](double v) -> int32_t {
+        if (!std::isfinite(v)) return 0;
+        double s = std::clamp(v * static_cast<double>(LDU_SCALE), -2147483520.0, 2147483520.0);
+        return static_cast<int32_t>(std::llround(s));
     };
     for (int i = 1; i < M; ++i)
         for (int j = 0; j < i; ++j) st.Lq[i * M + j] = clamp_i16(L[i * M + j]);
@@ -638,10 +656,10 @@ static LduStage complete_pivoted_ldu(const std::vector<double>& A_in, const std:
     st.cq.resize(M - 1); st.inv_cq_m1.resize(M - 1); st.cq_m1.resize(M - 1);
     double prod = 1.0;
     for (int k = 0; k < M - 1; ++k) {
-        prod *= d_abs[st.dperm[k]];
-        st.cq[k]        = static_cast<int32_t>(std::llround(prod * static_cast<double>(LDU_SCALE)));
-        st.inv_cq_m1[k] = static_cast<int32_t>(std::llround((1.0 / prod - 1.0) * static_cast<double>(LDU_SCALE)));
-        st.cq_m1[k]     = static_cast<int32_t>(std::llround((prod - 1.0) * static_cast<double>(LDU_SCALE)));
+        prod = std::clamp(prod * d_abs[st.dperm[k]], 1e-6, 1e6);
+        st.cq[k]        = clamp_i32(prod);
+        st.inv_cq_m1[k] = clamp_i32(1.0 / prod - 1.0);
+        st.cq_m1[k]     = clamp_i32(prod - 1.0);
     }
     return st;
 }

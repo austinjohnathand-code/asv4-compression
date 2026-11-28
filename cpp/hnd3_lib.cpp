@@ -751,7 +751,12 @@ static ParsedHnd4Meta parse_hnd4_meta(const uint8_t* data, size_t len, uint64_t 
         auto& e = m.index[t];
         e.offset = read_le<uint64_t>(ip); ip += 8;
         e.tile_bytes = read_le<uint32_t>(ip); ip += 4;
-        for (int k = 0; k < 16; ++k) { e.layer_bytes[k] = read_le<uint32_t>(ip); ip += 4; }
+        uint64_t lsum = 0;
+        for (int k = 0; k < 16; ++k) {
+            e.layer_bytes[k] = read_le<uint32_t>(ip); ip += 4;
+            if (k <= static_cast<int>(m.base_k)) lsum += e.layer_bytes[k];
+        }
+        if (lsum > e.tile_bytes) throw std::runtime_error("Corrupt HND4 tile layer_bytes sum > tile_bytes");
         for (int k = 0; k < 16; ++k) { e.layer_crc[k] = read_le<uint32_t>(ip); ip += 4; }
     }
     return m;
@@ -803,16 +808,32 @@ static void extract_tile_from_file(std::ifstream& f, uint32_t /*d0*/, uint32_t d
     size_t itemsize = dtype_size(dt_code);
     size_t tHW = static_cast<size_t>(th) * tw;
     if (spec_axis == 0) {
-        // BSQ: contiguous rows of length tw inside each band!
-        std::vector<uint8_t> row_buf(static_cast<size_t>(tw) * itemsize);
-        for (int b = 0; b < B; ++b) {
-            for (int y = 0; y < th; ++y) {
-                size_t off = ((static_cast<size_t>(b) * d1 + (y0 + y)) * d2 + x0) * itemsize;
+        // BSQ: read all th rows of band b in ONE contiguous strip read (<= 4 MB) to cut syscalls by ~100x!
+        size_t strip_bytes = static_cast<size_t>(th) * d2 * itemsize;
+        if (strip_bytes <= (4ULL << 20)) {
+            std::vector<uint8_t> strip(strip_bytes);
+            for (int b = 0; b < B; ++b) {
+                size_t off = ((static_cast<size_t>(b) * d1 + y0) * d2) * itemsize;
                 f.seekg(static_cast<std::streamoff>(off));
-                f.read(reinterpret_cast<char*>(row_buf.data()), static_cast<std::streamsize>(row_buf.size()));
-                if (!f) throw std::runtime_error("Short read extracting BSQ tile");
-                int64_t* dp = dst + static_cast<size_t>(b) * tHW + static_cast<size_t>(y) * tw;
-                for (int x = 0; x < tw; ++x) dp[x] = read_sample_le(row_buf.data() + x * itemsize, dt_code);
+                f.read(reinterpret_cast<char*>(strip.data()), static_cast<std::streamsize>(strip_bytes));
+                if (!f) throw std::runtime_error("Short read extracting BSQ tile strip");
+                for (int y = 0; y < th; ++y) {
+                    const uint8_t* sp = strip.data() + (static_cast<size_t>(y) * d2 + x0) * itemsize;
+                    int64_t* dp = dst + static_cast<size_t>(b) * tHW + static_cast<size_t>(y) * tw;
+                    for (int x = 0; x < tw; ++x) dp[x] = read_sample_le(sp + x * itemsize, dt_code);
+                }
+            }
+        } else {
+            std::vector<uint8_t> row_buf(static_cast<size_t>(tw) * itemsize);
+            for (int b = 0; b < B; ++b) {
+                for (int y = 0; y < th; ++y) {
+                    size_t off = ((static_cast<size_t>(b) * d1 + (y0 + y)) * d2 + x0) * itemsize;
+                    f.seekg(static_cast<std::streamoff>(off));
+                    f.read(reinterpret_cast<char*>(row_buf.data()), static_cast<std::streamsize>(row_buf.size()));
+                    if (!f) throw std::runtime_error("Short read extracting BSQ tile");
+                    int64_t* dp = dst + static_cast<size_t>(b) * tHW + static_cast<size_t>(y) * tw;
+                    for (int x = 0; x < tw; ++x) dp[x] = read_sample_le(row_buf.data() + x * itemsize, dt_code);
+                }
             }
         }
     } else if (spec_axis == 1) {
@@ -852,14 +873,26 @@ static void scatter_tile_to_file(const int64_t* tile, std::fstream& f, uint32_t 
     size_t itemsize = dtype_size(dt_code);
     size_t tHW = static_cast<size_t>(th) * tw;
     if (spec_axis == 0) {
-        std::vector<uint8_t> row_buf(static_cast<size_t>(tw) * itemsize);
-        for (int b = 0; b < B; ++b) {
-            for (int y = 0; y < th; ++y) {
-                const int64_t* sp = tile + static_cast<size_t>(b) * tHW + static_cast<size_t>(y) * tw;
-                for (int x = 0; x < tw; ++x) write_sample_le(row_buf.data() + x * itemsize, sp[x], dt_code, clamp_val);
-                size_t off = ((static_cast<size_t>(b) * d1 + (y0 + y)) * d2 + x0) * itemsize;
+        if (x0 == 0 && static_cast<uint32_t>(tw) == d2) {
+            // Contiguous full-width band strip: 1 write per band instead of th row seeks!
+            std::vector<uint8_t> strip(tHW * itemsize);
+            for (int b = 0; b < B; ++b) {
+                const int64_t* sp = tile + static_cast<size_t>(b) * tHW;
+                for (size_t i = 0; i < tHW; ++i) write_sample_le(strip.data() + i * itemsize, sp[i], dt_code, clamp_val);
+                size_t off = ((static_cast<size_t>(b) * d1 + y0) * d2) * itemsize;
                 f.seekp(static_cast<std::streamoff>(off));
-                f.write(reinterpret_cast<const char*>(row_buf.data()), static_cast<std::streamsize>(row_buf.size()));
+                f.write(reinterpret_cast<const char*>(strip.data()), static_cast<std::streamsize>(strip.size()));
+            }
+        } else {
+            std::vector<uint8_t> row_buf(static_cast<size_t>(tw) * itemsize);
+            for (int b = 0; b < B; ++b) {
+                for (int y = 0; y < th; ++y) {
+                    const int64_t* sp = tile + static_cast<size_t>(b) * tHW + static_cast<size_t>(y) * tw;
+                    for (int x = 0; x < tw; ++x) write_sample_le(row_buf.data() + x * itemsize, sp[x], dt_code, clamp_val);
+                    size_t off = ((static_cast<size_t>(b) * d1 + (y0 + y)) * d2 + x0) * itemsize;
+                    f.seekp(static_cast<std::streamoff>(off));
+                    f.write(reinterpret_cast<const char*>(row_buf.data()), static_cast<std::streamsize>(row_buf.size()));
+                }
             }
         }
     } else if (spec_axis == 1) {
@@ -926,6 +959,7 @@ static std::vector<int64_t> sample_cube_for_ldu_file(std::ifstream& f, uint32_t 
                 size_t off = ((static_cast<size_t>(b) * d1 + y) * d2) * itemsize;
                 f.seekg(static_cast<std::streamoff>(off));
                 f.read(reinterpret_cast<char*>(row.data()), static_cast<std::streamsize>(row.size()));
+                if (!f) throw std::runtime_error("Short read sampling BSQ cube for LDU");
                 for (int x = 0; x < W; x += step_x)
                     X[static_cast<size_t>(b) * out_nsamp + k++] = nl_quant(read_sample_le(row.data() + x * itemsize, dt_code), max_error);
             }
@@ -937,6 +971,7 @@ static std::vector<int64_t> sample_cube_for_ldu_file(std::ifstream& f, uint32_t 
                 size_t off = ((static_cast<size_t>(y) * d1 + b) * d2) * itemsize;
                 f.seekg(static_cast<std::streamoff>(off));
                 f.read(reinterpret_cast<char*>(row.data()), static_cast<std::streamsize>(row.size()));
+                if (!f) throw std::runtime_error("Short read sampling BIL cube for LDU");
                 size_t base = static_cast<size_t>(b) * out_nsamp + static_cast<size_t>(y_i) * sx;
                 for (int x_i = 0, x = 0; x < W; x += step_x, ++x_i)
                     X[base + x_i] = nl_quant(read_sample_le(row.data() + x * itemsize, dt_code), max_error);
@@ -950,6 +985,7 @@ static std::vector<int64_t> sample_cube_for_ldu_file(std::ifstream& f, uint32_t 
                 size_t off = ((static_cast<size_t>(y) * d1 + x) * d2) * itemsize;
                 f.seekg(static_cast<std::streamoff>(off));
                 f.read(reinterpret_cast<char*>(px.data()), static_cast<std::streamsize>(px.size()));
+                if (!f) throw std::runtime_error("Short read sampling BIP cube for LDU");
                 for (int b = 0; b < B; ++b)
                     X[static_cast<size_t>(b) * out_nsamp + k] = nl_quant(read_sample_le(px.data() + b * itemsize, dt_code), max_error);
                 k++;
@@ -960,7 +996,8 @@ static std::vector<int64_t> sample_cube_for_ldu_file(std::ifstream& f, uint32_t 
 }
 
 static std::vector<uint8_t> encode_hnd4_buffer(const uint8_t* raw_bytes, size_t n_bytes,
-                                               const EncodeOptions& opt, EncodeStats* st_out) {
+                                               const EncodeOptions& opt, EncodeStats* st_out,
+                                               uint8_t extra_flags = 0) {
     uint8_t dt_code = static_cast<uint8_t>(opt.dtype);
     size_t itemsize = dtype_size(dt_code);
     uint32_t d0 = opt.d0, d1 = opt.d1, d2 = opt.d2;
@@ -981,7 +1018,10 @@ static std::vector<uint8_t> encode_hnd4_buffer(const uint8_t* raw_bytes, size_t 
     uint32_t tile_w = (opt.tile_size > 0) ? std::min<uint32_t>(opt.tile_size, static_cast<uint32_t>(W)) : static_cast<uint32_t>(W);
     uint32_t n_ty = (static_cast<uint32_t>(H) + tile_h - 1) / tile_h;
     uint32_t n_tx = (static_cast<uint32_t>(W) + tile_w - 1) / tile_w;
-    size_t n_tiles = static_cast<size_t>(n_ty) * n_tx;
+    uint64_t n_tiles64 = static_cast<uint64_t>(n_ty) * n_tx;
+    if (n_tiles64 == 0 || n_tiles64 > 65536ULL)
+        throw std::runtime_error("HND4 tile count exceeds 65536 limit (increase --tile-size)");
+    size_t n_tiles = static_cast<size_t>(n_tiles64);
 
     // Sample up to 16K spatial pixels for shared global LDU-RKLT
     int step_y = 1, step_x = 1;
@@ -1008,7 +1048,7 @@ static std::vector<uint8_t> encode_hnd4_buffer(const uint8_t* raw_bytes, size_t 
     Xs.clear(); Xs.shrink_to_fit();
 
     auto sha = sha256_bytes(raw_bytes, n_bytes);
-    uint8_t flags = FLAG_CRC32C;
+    uint8_t flags = FLAG_CRC32C | extra_flags;
     if (n_tiles > 1) flags |= FLAG_TILED;
     if (opt.max_error > 0) flags |= FLAG_NEAR_LOSSLESS | FLAG_LOSSY;
 
@@ -1208,7 +1248,7 @@ std::vector<uint8_t> encode(const uint8_t* raw_bytes, size_t n_bytes,
                 local_st.d0 = resolved.d0; local_st.d1 = resolved.d1; local_st.d2 = resolved.d2;
                 local_st.spec_axis = sp_ax;
                 if (resolved.tile_size > 0 || resolved.max_error > 0 || resolved.per_layer_crc) {
-                    blob = encode_hnd4_buffer(raw_bytes, n_bytes, resolved, &local_st);
+                    blob = encode_hnd4_buffer(raw_bytes, n_bytes, resolved, &local_st, FLAG_BLIND);
                 } else {
                     blob = encode_hnd3_v3(raw_bytes, resolved.d0, resolved.d1, resolved.d2, dt_code,
                                           resolved.mode, resolved.levels, resolved.spec_axis,
@@ -1289,6 +1329,18 @@ FileInfo inspect(const uint8_t* data, size_t len) {
         fi.tile_h = read_le<uint32_t>(data + 24); fi.tile_w = read_le<uint32_t>(data + 28);
         fi.n_tiles_y = read_le<uint32_t>(data + 32); fi.n_tiles_x = read_le<uint32_t>(data + 36);
         fi.max_error = read_le<uint32_t>(data + 40);
+        uint32_t spec_len = read_le<uint32_t>(data + 76);
+        uint32_t header_crc = read_le<uint32_t>(data + 80);
+        uint64_t n_tiles = static_cast<uint64_t>(fi.n_tiles_y) * fi.n_tiles_x;
+        if (n_tiles > 0 && n_tiles <= 65536ULL) {
+            uint64_t meta_body = static_cast<uint64_t>(spec_len) + n_tiles * TILE_ENTRY_SIZE;
+            if (meta_body <= len - HDR4_SIZE) {
+                fi.header_crc_checked = true;
+                uint32_t c = crc32c_impl(data, HDR4_SIZE - 4, 0u);
+                c = crc32c_impl(data + HDR4_SIZE, static_cast<size_t>(meta_body), c);
+                fi.header_crc_ok = (c == header_crc);
+            }
+        }
         return fi;
     }
     if (len >= HDR_SIZE && std::memcmp(data, MAGIC, 4) == 0 && data[4] == VERSION) {
@@ -1298,6 +1350,40 @@ FileInfo inspect(const uint8_t* data, size_t len) {
         return fi;
     }
     throw std::runtime_error("Invalid HND3/HND4 stream");
+}
+
+FileInfo inspect_file(const std::string& path) {
+    std::ifstream fin(path, std::ios::binary | std::ios::ate);
+    if (!fin) throw std::runtime_error("Cannot open input file: " + path);
+    size_t file_sz = static_cast<size_t>(fin.tellg());
+    if (file_sz < HDR_SIZE) throw std::runtime_error("Truncated HND3/HND4 file");
+    size_t first_read = std::min<size_t>(file_sz, HDR4_SIZE);
+    std::vector<uint8_t> hdr(first_read);
+    fin.seekg(0);
+    fin.read(reinterpret_cast<char*>(hdr.data()), static_cast<std::streamsize>(first_read));
+    if (!fin) throw std::runtime_error("Short read inspecting HND header");
+
+    if (first_read >= HDR4_SIZE && std::memcmp(hdr.data(), MAGIC4, 4) == 0 && hdr[4] == VERSION4) {
+        uint32_t n_ty = read_le<uint32_t>(hdr.data() + 32);
+        uint32_t n_tx = read_le<uint32_t>(hdr.data() + 36);
+        uint32_t spec_len = read_le<uint32_t>(hdr.data() + 76);
+        uint64_t n_tiles = static_cast<uint64_t>(n_ty) * n_tx;
+        if (n_tiles > 0 && n_tiles <= 65536ULL) {
+            uint64_t meta_sz = static_cast<uint64_t>(HDR4_SIZE) + spec_len + n_tiles * TILE_ENTRY_SIZE;
+            if (meta_sz <= file_sz && meta_sz <= (64ULL << 20)) {
+                std::vector<uint8_t> meta(static_cast<size_t>(meta_sz));
+                fin.seekg(0);
+                fin.read(reinterpret_cast<char*>(meta.data()), static_cast<std::streamsize>(meta_sz));
+                if (!fin) throw std::runtime_error("Short read inspecting HND4 metadata");
+                FileInfo fi = inspect(meta.data(), meta.size());
+                fi.file_bytes = file_sz;
+                return fi;
+            }
+        }
+    }
+    FileInfo fi = inspect(hdr.data(), hdr.size());
+    fi.file_bytes = file_sz;
+    return fi;
 }
 
 // =============================================================================
@@ -1325,7 +1411,10 @@ EncodeStats encode_file(const std::string& in_path, const std::string& out_path,
     uint8_t dt_code = static_cast<uint8_t>(opt.dtype);
     size_t itemsize = dtype_size(dt_code);
     if (opt.d0 == 0 || opt.d1 == 0 || opt.d2 == 0) throw std::runtime_error("Zero dimension in --shape");
-    uint64_t tot64 = static_cast<uint64_t>(opt.d0) * opt.d1 * opt.d2;
+    unsigned __int128 tot128 = static_cast<unsigned __int128>(opt.d0) * opt.d1 * opt.d2;
+    if (tot128 > (std::numeric_limits<uint64_t>::max() / itemsize))
+        throw std::runtime_error("Cube byte size overflows 64-bit limit");
+    uint64_t tot64 = static_cast<uint64_t>(tot128);
 
     std::ifstream fin(in_path, std::ios::binary | std::ios::ate);
     if (!fin) throw std::runtime_error("Cannot open input file: " + in_path);
@@ -1350,7 +1439,10 @@ EncodeStats encode_file(const std::string& in_path, const std::string& out_path,
     uint32_t tile_w = (opt.tile_size > 0) ? std::min<uint32_t>(opt.tile_size, static_cast<uint32_t>(W)) : static_cast<uint32_t>(W);
     uint32_t n_ty = (static_cast<uint32_t>(H) + tile_h - 1) / tile_h;
     uint32_t n_tx = (static_cast<uint32_t>(W) + tile_w - 1) / tile_w;
-    size_t n_tiles = static_cast<size_t>(n_ty) * n_tx;
+    uint64_t n_tiles64 = static_cast<uint64_t>(n_ty) * n_tx;
+    if (n_tiles64 == 0 || n_tiles64 > 65536ULL)
+        throw std::runtime_error("HND4 tile count exceeds 65536 limit (increase --tile-size)");
+    size_t n_tiles = static_cast<size_t>(n_tiles64);
 
     auto t0 = std::chrono::steady_clock::now();
 
@@ -1488,12 +1580,16 @@ DecodedCube decode_file(const std::string& in_path, const std::string& out_path,
     uint32_t spec_len = read_le<uint32_t>(hdr.data() + 76);
     uint64_t n_tiles = static_cast<uint64_t>(n_ty) * n_tx;
     if (n_tiles == 0 || n_tiles > 65536ULL) throw std::runtime_error("Invalid HND4 tile grid");
-    size_t meta_sz = HDR4_SIZE + static_cast<size_t>(spec_len) + static_cast<size_t>(n_tiles) * TILE_ENTRY_SIZE;
-    if (meta_sz > file_sz) throw std::runtime_error("Truncated HND4 metadata/index");
+    uint64_t idx_bytes64 = n_tiles * TILE_ENTRY_SIZE;
+    if (static_cast<uint64_t>(spec_len) > file_sz - HDR4_SIZE ||
+        idx_bytes64 > file_sz - HDR4_SIZE - spec_len)
+        throw std::runtime_error("Truncated HND4 metadata/index");
+    size_t meta_sz = static_cast<size_t>(HDR4_SIZE + static_cast<uint64_t>(spec_len) + idx_bytes64);
 
     std::vector<uint8_t> meta_buf(meta_sz);
     fin.seekg(0);
     fin.read(reinterpret_cast<char*>(meta_buf.data()), static_cast<std::streamsize>(meta_sz));
+    if (!fin) throw std::runtime_error("Short read loading HND4 metadata/index");
     auto m = parse_hnd4_meta(meta_buf.data(), meta_buf.size(), opt.max_samples, opt.verify_crc);
     meta_buf.clear(); meta_buf.shrink_to_fit();
 
@@ -1559,7 +1655,10 @@ DecodedCube decode_file(const std::string& in_path, const std::string& out_path,
             // Seek directly to tile and read ONLY layers down to stop_layer!
             std::vector<uint8_t> tbuf(need_bytes);
             fin.seekg(static_cast<std::streamoff>(e.offset));
-            if (need_bytes > 0) fin.read(reinterpret_cast<char*>(tbuf.data()), static_cast<std::streamsize>(need_bytes));
+            if (need_bytes > 0) {
+                fin.read(reinterpret_cast<char*>(tbuf.data()), static_cast<std::streamsize>(need_bytes));
+                if (!fin) throw std::runtime_error("Short read loading HND4 tile payload");
+            }
             auto work = decode_tile_layers(tbuf.data(), tbuf.size(), m.B, th, tw,
                                            m.n_lv, m.base_k, m.n_stripes, opt.stop_layer, opt.max_level,
                                            e.layer_bytes.data(), e.layer_crc.data(),
@@ -1577,6 +1676,14 @@ DecodedCube decode_file(const std::string& in_path, const std::string& out_path,
                     scatter_tile_to_file(work.data(), fout, m.d0, m.d1, m.d2,
                                          m.dt_code, m.spec_axis, m.B, y0, th, x0, tw, !is_lossless);
                 }
+            } else if (opt.verify_sha && is_lossless && m.n_ty == 1 && m.n_tx == 1) {
+                // Single-tile lossless decode without out_path (e.g. --bench / verify-only): verify SHA-256 in memory!
+                std::vector<uint8_t> tmp(out_total_bytes);
+                scatter_tile_to_mem(work.data(), tmp.data(), m.d0, m.d1, m.d2,
+                                    m.dt_code, m.spec_axis, m.B, 0, th, 0, tw, false);
+                res.sha_checked = true;
+                res.sha_ok = (sha256_bytes(tmp.data(), tmp.size()) == m.sha);
+                if (!res.sha_ok) throw std::runtime_error("SHA-256 verification FAILED on single-tile HND4 decode!");
             }
         }
     }

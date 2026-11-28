@@ -97,6 +97,8 @@ struct FileInfo {
     uint32_t tile_h = 0, tile_w = 0, n_tiles_y = 1, n_tiles_x = 1;
     uint32_t max_error = 0;
     size_t file_bytes = 0;
+    bool header_crc_checked = false;
+    bool header_crc_ok = false;
 };
 
 // In-memory buffer API (supports both HND3 v3 and HND4 v4)
@@ -113,6 +115,7 @@ DecodedCube decode_file(const std::string& in_path, const std::string& out_path,
                         const DecodeOptions& opt = {});
 
 FileInfo inspect(const uint8_t* data, size_t len);
+FileInfo inspect_file(const std::string& path);
 
 // Compute Castagnoli CRC32C (useful for external callers/tests)
 uint32_t crc32c(const uint8_t* data, size_t len, uint32_t init = 0u);

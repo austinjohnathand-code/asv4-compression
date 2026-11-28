@@ -7,7 +7,7 @@ namespace hnd3 {
 // =============================================================================
 static inline void val_to_tok_eb(int64_t v, uint8_t& tok, uint8_t& eb, uint64_t& rem) {
     uint64_t u = (v >= 0) ? (static_cast<uint64_t>(v) << 1)
-                          : ((static_cast<uint64_t>(-v) << 1) - 1ULL);
+                          : ((uabs64(v) << 1) - 1ULL);
     if (u < 4ULL) { tok = static_cast<uint8_t>(u); eb = 0; rem = 0; return; }
     if (u < (1ULL << 15)) {
         int m = 63 - __builtin_clzll(u);
@@ -191,6 +191,37 @@ struct FastBitWriter {
     }
 };
 
+// Shared overflow-proof 3D activity context & EMA update used identically by BOTH
+// pack_rans_stripe() and unpack_rans_stripe() (eliminates signed int64 overflow on dense full-range int32!)
+static inline uint8_t compute_base_ctx(const int64_t* pl, const int64_t* pl_prev, const int64_t* pl_par,
+                                       bool has_p, int b, int y, int x, int W, int py, int pW,
+                                       int64_t cur_ema, int64_t prev_ema) {
+    unsigned __int128 sp_sum = 0; int sp_w = 0;
+    if (x > 0) { sp_sum += static_cast<unsigned __int128>(uabs64(pl[y * W + x - 1])) * 2u; sp_w += 2; }
+    if (y > 0) {
+        sp_sum += static_cast<unsigned __int128>(uabs64(pl[(y - 1) * W + x])) * 2u; sp_w += 2;
+        if (x > 0)     { sp_sum += uabs64(pl[(y - 1) * W + x - 1]); sp_w += 1; }
+        if (x + 1 < W) { sp_sum += uabs64(pl[(y - 1) * W + x + 1]); sp_w += 1; }
+    }
+    unsigned __int128 a_sp  = (sp_w > 0) ? (sp_sum / static_cast<unsigned>(sp_w)) : 0;
+    unsigned __int128 a_par = has_p ? (uabs64(pl_par[py * pW + std::min(x >> 1, pW - 1)]) >> 1) : 0;
+    unsigned __int128 a_xb  = (b > 0) ? ((static_cast<unsigned __int128>(uabs64(pl_prev[y * W + x])) * static_cast<uint64_t>(cur_ema)) / static_cast<uint64_t>(prev_ema)) : 0;
+    unsigned __int128 act_u;
+    if (has_p && b > 0) act_u = (3 * a_sp + a_par + a_xb) / 5;
+    else if (has_p)     act_u = (3 * a_sp + a_par) >> 2;
+    else if (b > 0)     act_u = (3 * a_sp + a_xb) >> 2;
+    else                act_u = a_sp;
+    int64_t act = (act_u > 1000000ULL) ? 1000000LL : static_cast<int64_t>(act_u);
+    return act_to_ctx(act);
+}
+
+static inline int64_t update_band_ema(int64_t cur_ema, int64_t v) {
+    uint64_t uv = uabs64(v);
+    int64_t av = (uv <= (1ULL << 58)) ? static_cast<int64_t>(uv << 4) : (1LL << 62);
+    cur_ema = cur_ema + floor_shr128(static_cast<__int128>(av) - cur_ema, 6);
+    return (cur_ema < 4) ? 4 : cur_ema;
+}
+
 // Pack ONE band stripe [0..Bs) of a base subband (Bs, H, W)
 static std::vector<uint8_t> pack_rans_stripe(const int64_t* blk, int Bs, int H, int W,
                                              const int64_t* par, int pH, int pW) {
@@ -212,33 +243,14 @@ static std::vector<uint8_t> pack_rans_stripe(const int64_t* blk, int Bs, int H, 
         for (int y = 0; y < H; ++y) {
             int py = has_p ? std::min(y >> 1, pH - 1) : 0;
             for (int x = 0; x < W; ++x) {
-                int64_t sp_sum = 0; int sp_w = 0;
-                if (x > 0) { sp_sum += 2 * std::abs(pl[y * W + x - 1]); sp_w += 2; }
-                if (y > 0) {
-                    sp_sum += 2 * std::abs(pl[(y - 1) * W + x]); sp_w += 2;
-                    if (x > 0)     { sp_sum += std::abs(pl[(y - 1) * W + x - 1]); sp_w += 1; }
-                    if (x + 1 < W) { sp_sum += std::abs(pl[(y - 1) * W + x + 1]); sp_w += 1; }
-                }
-                int64_t a_sp  = (sp_w > 0) ? (sp_sum / sp_w) : 0;
-                int64_t a_par = has_p ? (std::abs(pl_par[py * pW + std::min(x >> 1, pW - 1)]) >> 1) : 0;
-                int64_t a_xb  = (b > 0) ? ((std::abs(pl_prev[y * W + x]) * cur_ema) / prev_ema) : 0;
-                int64_t act;
-                if (has_p && b > 0) act = (3 * a_sp + a_par + a_xb) / 5;
-                else if (has_p)     act = (3 * a_sp + a_par) >> 2;
-                else if (b > 0)     act = (3 * a_sp + a_xb) >> 2;
-                else                act = a_sp;
-
-                uint8_t c = act_to_ctx(act);
+                uint8_t c = compute_base_ctx(pl, pl_prev, pl_par, has_p, b, y, x, W, py, pW, cur_ema, prev_ema);
                 int64_t v = pl[y * W + x];
                 uint8_t tok, eb; uint64_t rem;
                 val_to_tok_eb(v, tok, eb, rem);
                 toks[idx] = tok; ctxs[idx] = c; ebs[idx] = eb; rems[idx] = rem;
                 counts[c * N_SYMS + tok]++;
                 idx++;
-
-                int64_t av = std::abs(v) << 4;
-                cur_ema = cur_ema + floor_shr(av - cur_ema, 6);
-                if (cur_ema < 4) cur_ema = 4;
+                cur_ema = update_band_ema(cur_ema, v);
             }
         }
         prev_ema = cur_ema;
@@ -341,24 +353,7 @@ static void unpack_rans_stripe(const uint8_t* p, size_t payload_pos, size_t payl
         for (int y = 0; y < H; ++y) {
             int py = has_p ? std::min(y >> 1, pH - 1) : 0;
             for (int x = 0; x < W; ++x) {
-                unsigned __int128 sp_sum = 0; int sp_w = 0;
-                if (x > 0) { sp_sum += static_cast<unsigned __int128>(uabs64(pl[y * W + x - 1])) * 2u; sp_w += 2; }
-                if (y > 0) {
-                    sp_sum += static_cast<unsigned __int128>(uabs64(pl[(y - 1) * W + x])) * 2u; sp_w += 2;
-                    if (x > 0)     { sp_sum += uabs64(pl[(y - 1) * W + x - 1]); sp_w += 1; }
-                    if (x + 1 < W) { sp_sum += uabs64(pl[(y - 1) * W + x + 1]); sp_w += 1; }
-                }
-                unsigned __int128 a_sp  = (sp_w > 0) ? (sp_sum / static_cast<unsigned>(sp_w)) : 0;
-                unsigned __int128 a_par = has_p ? (uabs64(pl_par[py * pW + std::min(x >> 1, pW - 1)]) >> 1) : 0;
-                unsigned __int128 a_xb  = (b > 0) ? ((static_cast<unsigned __int128>(uabs64(pl_prev[y * W + x])) * static_cast<uint64_t>(cur_ema)) / static_cast<uint64_t>(prev_ema)) : 0;
-                unsigned __int128 act_u;
-                if (has_p && b > 0) act_u = (3 * a_sp + a_par + a_xb) / 5;
-                else if (has_p)     act_u = (3 * a_sp + a_par) >> 2;
-                else if (b > 0)     act_u = (3 * a_sp + a_xb) >> 2;
-                else                act_u = a_sp;
-                int64_t act = (act_u > 1000000ULL) ? 1000000LL : static_cast<int64_t>(act_u);
-
-                uint8_t c = act_to_ctx(act);
+                uint8_t c = compute_base_ctx(pl, pl_prev, pl_par, has_p, b, y, x, W, py, pW, cur_ema, prev_ema);
                 uint64_t slot = state & MASK_M;
                 uint8_t s = lut[c * RANS_M + slot];
                 uint64_t f = static_cast<uint64_t>(freqs[c * N_SYMS + s]);
@@ -393,11 +388,7 @@ static void unpack_rans_stripe(const uint8_t* p, size_t payload_pos, size_t payl
                 }
                 int64_t v = tok_eb_to_val(s, rem);
                 pl[y * W + x] = v;
-
-                uint64_t uv = uabs64(v);
-                int64_t av = (uv <= (1ULL << 58)) ? static_cast<int64_t>(uv << 4) : (1LL << 62);
-                cur_ema = cur_ema + floor_shr128(static_cast<__int128>(av) - cur_ema, 6);
-                if (cur_ema < 4) cur_ema = 4;
+                cur_ema = update_band_ema(cur_ema, v);
             }
         }
         prev_ema = cur_ema;

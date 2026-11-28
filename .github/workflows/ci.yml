@@ -86,7 +86,7 @@ jobs:
         run: |
           mkdir -p /tmp/ci_corp_hnd3 /tmp/ci_corp_asv4
           python3 - << 'EOF'
-          import subprocess, numpy as np
+          import hashlib, struct, subprocess, numpy as np, zstandard as zstd
           rng = np.random.default_rng(7)
           c = rng.integers(-1000, 1000, (8, 16, 16), dtype="<i2")
           c.tofile("/tmp/ci_s.raw")
@@ -94,6 +94,18 @@ jobs:
           subprocess.run(["./hnd3", "enc", "/tmp/ci_s.raw", "/tmp/ci_corp_hnd3/v4.hnd4", "--shape", "8,16,16", "--dtype", "i16", "--base-k", "6", "--tile-size", "8", "--max-error", "2", "--threads", "1"], check=True)
           open("/tmp/ci_a.raw", "wb").write(b"ASV4 CI fuzz seed! " * 200)
           subprocess.run(["./asv4", "c", "/tmp/ci_a.raw", "/tmp/ci_corp_asv4/t0.asv4", "--level", "3"], check=True)
+          for name, tid, w, h, xlen, tlen in [
+              ("t1", 1, 4, 0, 256, 3), ("t2_elem", 2, 4, 0, 256, 1), ("t2_xor", 3, 8, 0, 256, 5),
+              ("t2_bit", 4, 4, 0, 512, 2), ("t3_2d", 5, 4, 16, 256, 0), ("t2_nib", 6, 4, 0, 256, 2),
+          ]:
+              orig_len = xlen + tlen
+              meta = struct.pack("<IBBHHHIQ", orig_len, tid, 0, w, h, 0, tlen, 0)
+              cm = zstd.ZstdCompressor(level=1).compress(meta)
+              cr = zstd.ZstdCompressor(level=1).compress(bytes(tlen)) if tlen else b""
+              cx = zstd.ZstdCompressor(level=1).compress(bytes((i * 37) & 0xFF for i in range(xlen)))
+              blob = struct.pack("<4sBBH", b"ASV3", 4, 20, 0) + struct.pack("<B5I", 1, orig_len, len(cm), len(cr), len(cx), 0) + cm + cr + cx
+              blob += struct.pack("<B4I", 0xFF, 0, 0, 0, 0) + struct.pack("<Q", orig_len) + hashlib.sha256(b"x").digest()
+              open(f"/tmp/ci_corp_asv4/{name}.asv4", "wb").write(blob)
           EOF
           /tmp/fuzz_hnd3 /tmp/ci_corp_hnd3 -max_total_time=20 -max_len=16384 -print_final_stats=1
           /tmp/fuzz_asv4 /tmp/ci_corp_asv4 -max_total_time=20 -max_len=16384 -print_final_stats=1

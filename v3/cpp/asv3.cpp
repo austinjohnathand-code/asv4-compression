@@ -2384,12 +2384,25 @@ int run_decode(FILE* fin, FILE* fout) {
 }  // namespace asv3
 
 #ifndef ASV3_NO_MAIN
+static bool parse_strict_int(const char* s, int& out) {
+    if (!s || !*s) return false;
+    char* end = nullptr;
+    long v = std::strtol(s, &end, 10);
+    if (!end || *end != '\0' || v < -2147483647L || v > 2147483647L) return false;
+    out = static_cast<int>(v);
+    return true;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: asv3 <c|d> [in|-] [out|-] [--level 3|19] [--block-mb 4] [--stats file.json]\n");
+        std::fprintf(stderr, "Usage: asv3 <c|d> [in|-] [out|-] [--level 1..22] [--block-mb 1..256] [--flush-mb 1..512] [--stats file.json] [--trace]\n");
         return 1;
     }
     std::string mode = argv[1];
+    if (mode != "c" && mode != "d") {
+        std::fprintf(stderr, "Invalid mode '%s' (expected 'c' or 'd')\n", mode.c_str());
+        return 1;
+    }
     std::string in_path = "-";
     std::string out_path = "-";
     std::string stats_path;
@@ -2399,18 +2412,40 @@ int main(int argc, char** argv) {
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--level" && i + 1 < argc) {
-            cfg.level = std::atoi(argv[++i]);
+            int lv = 0;
+            if (!parse_strict_int(argv[++i], lv) || lv < 1 || lv > 22) {
+                std::fprintf(stderr, "Invalid --level (expected integer in 1..22)\n");
+                return 1;
+            }
+            cfg.level = lv;
         } else if (a == "--block-mb" && i + 1 < argc) {
-            cfg.block_size_bytes = static_cast<size_t>(std::atoi(argv[++i])) * asv3::MB;
+            int bm = 0;
+            if (!parse_strict_int(argv[++i], bm) || bm < 1 || bm > 256) {
+                std::fprintf(stderr, "Invalid --block-mb (expected integer in 1..256)\n");
+                return 1;
+            }
+            cfg.block_size_bytes = static_cast<size_t>(bm) * asv3::MB;
         } else if (a == "--flush-mb" && i + 1 < argc) {
-            cfg.flush_group_bytes = static_cast<size_t>(std::atoi(argv[++i])) * asv3::MB;
+            int fm = 0;
+            if (!parse_strict_int(argv[++i], fm) || fm < 1 || fm > 512) {
+                std::fprintf(stderr, "Invalid --flush-mb (expected integer in 1..512)\n");
+                return 1;
+            }
+            cfg.flush_group_bytes = static_cast<size_t>(fm) * asv3::MB;
         } else if (a == "--stats" && i + 1 < argc) {
             stats_path = argv[++i];
         } else if (a == "--trace") {
             cfg.trace = true;
+        } else if (a.size() >= 2 && a[0] == '-' && a[1] == '-') {
+            std::fprintf(stderr, "Unknown or incomplete option: %s\n", a.c_str());
+            return 1;
         } else {
             pos_args.push_back(a);
         }
+    }
+    if (pos_args.size() > 2) {
+        std::fprintf(stderr, "Too many positional arguments\n");
+        return 1;
     }
     if (pos_args.size() >= 1) in_path = pos_args[0];
     if (pos_args.size() >= 2) out_path = pos_args[1];

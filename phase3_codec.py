@@ -2,7 +2,7 @@
 """
 Phase 3 Unified Band-Striped .hnd3 Reference Codec (Python + Numba).
 
-Wire-compatible bit-for-bit with cpp/hnd3.cpp (./hnd3):
+Wire-compatible bit-for-bit with libhnd3 / cpp/hnd3_lib.cpp (./hnd3):
   * Band-stripe parallel 32-bit rANS (n_stripes = min(B, 16) independent band
     stripes per subband, each with its own compact 12-bit frequency table).
   * Supports base_k=0 (one-shot) and base_k=6 (7-layer quality-embedded).
@@ -74,7 +74,7 @@ def encode_hnd3(C, spec_mode="auto", L=3, base_k=6, n_stripes=16, spec_axis=0, f
             par = par_mids[par_idx][b0:b1] if par_idx is not None else None
             out += p1.pack_rans_subband(c_base[b0:b1], parent=par)
 
-    # Refinement layers k = base_k - 1 .. 0 (level-major, matching cpp/hnd3.cpp!)
+    # Refinement layers k = base_k - 1 .. 0 (level-major, matching libhnd3 / cpp/hnd3_lib.cpp!)
     for k in range(base_k - 1, -1, -1):
         for lv in range(len(plan) + 1):
             lv_subs = []

@@ -4,6 +4,7 @@
 #include "hnd3.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -15,6 +16,48 @@
 #include <thread>
 #include <vector>
 
+static int parse_int_strict(const char* s, const char* name) {
+    if (!s || !*s) throw std::runtime_error(std::string("Missing integer value for ") + name);
+    char* end = nullptr;
+    errno = 0;
+    long v = std::strtol(s, &end, 10);
+    if (errno != 0 || !end || *end != '\0' || v < -2147483647L || v > 2147483647L)
+        throw std::runtime_error(std::string("Invalid integer for ") + name + ": " + s);
+    return static_cast<int>(v);
+}
+
+static uint32_t parse_u32_strict(const char* s, const char* name) {
+    if (!s || !*s || s[0] == '-') throw std::runtime_error(std::string("Invalid unsigned integer for ") + name + ": " + (s ? s : ""));
+    char* end = nullptr;
+    errno = 0;
+    unsigned long long v = std::strtoull(s, &end, 10);
+    if (errno != 0 || !end || *end != '\0' || v > 0xFFFFFFFFULL)
+        throw std::runtime_error(std::string("Invalid unsigned integer for ") + name + ": " + s);
+    return static_cast<uint32_t>(v);
+}
+
+static void parse_shape_strict(const char* s, uint32_t& d0, uint32_t& d1, uint32_t& d2) {
+    std::string str = s ? s : "";
+    size_t c1 = str.find(',');
+    size_t c2 = (c1 == std::string::npos) ? std::string::npos : str.find(',', c1 + 1);
+    if (c1 == std::string::npos || c2 == std::string::npos || str.find(',', c2 + 1) != std::string::npos)
+        throw std::runtime_error("Bad --shape (expected D0,D1,D2)");
+    d0 = parse_u32_strict(str.substr(0, c1).c_str(), "--shape D0");
+    d1 = parse_u32_strict(str.substr(c1 + 1, c2 - c1 - 1).c_str(), "--shape D1");
+    d2 = parse_u32_strict(str.substr(c2 + 1).c_str(), "--shape D2");
+}
+
+static void parse_tile_strict(const char* s, int& ty, int& tx) {
+    std::string str = s ? s : "";
+    size_t c1 = str.find(',');
+    if (c1 == std::string::npos || str.find(',', c1 + 1) != std::string::npos)
+        throw std::runtime_error("Bad --tile (expected TY,TX)");
+    ty = parse_int_strict(str.substr(0, c1).c_str(), "--tile TY");
+    tx = parse_int_strict(str.substr(c1 + 1).c_str(), "--tile TX");
+    if (ty < 0 || tx < 0) throw std::runtime_error("--tile coordinates must be >= 0");
+}
+
+#ifdef HND3_ENABLE_FUZZ
 static std::vector<uint8_t> read_file_bytes(const std::string& path) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) throw std::runtime_error("Cannot open input file: " + path);
@@ -24,6 +67,7 @@ static std::vector<uint8_t> read_file_bytes(const std::string& path) {
     if (sz > 0) f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(sz));
     return buf;
 }
+#endif
 
 int main(int argc, char** argv) {
     try {
@@ -51,8 +95,7 @@ int main(int argc, char** argv) {
             for (int i = 4; i < argc; ++i) {
                 std::string a = argv[i];
                 if (a == "--shape" && i + 1 < argc) {
-                    if (std::sscanf(argv[++i], "%u,%u,%u", &opt.d0, &opt.d1, &opt.d2) != 3)
-                        throw std::runtime_error("Bad --shape");
+                    parse_shape_strict(argv[++i], opt.d0, opt.d1, opt.d2);
                     has_shape = true;
                 } else if (a == "--blind") {
                     opt.blind = true;
@@ -64,27 +107,25 @@ int main(int argc, char** argv) {
                     else throw std::runtime_error("Bad --dtype (expected u16|i16|i32)");
                     has_dtype = true;
                 } else if (a == "--base-k" && i + 1 < argc) {
-                    base_k_i = std::atoi(argv[++i]);
+                    base_k_i = parse_int_strict(argv[++i], "--base-k");
                 } else if (a == "--mode" && i + 1 < argc) {
                     opt.mode = argv[++i];
                 } else if (a == "--stripes" && i + 1 < argc) {
-                    n_stripes_i = std::atoi(argv[++i]);
+                    n_stripes_i = parse_int_strict(argv[++i], "--stripes");
                 } else if (a == "--spec-axis" && i + 1 < argc) {
-                    spec_axis_i = std::atoi(argv[++i]);
+                    spec_axis_i = parse_int_strict(argv[++i], "--spec-axis");
                 } else if (a == "--levels" && i + 1 < argc) {
-                    n_lv_i = std::atoi(argv[++i]);
+                    n_lv_i = parse_int_strict(argv[++i], "--levels");
                 } else if (a == "--tile-size" && i + 1 < argc) {
-                    int ts = std::atoi(argv[++i]);
-                    if (ts < 0) throw std::runtime_error("--tile-size must be >= 0");
-                    opt.tile_size = static_cast<uint32_t>(ts);
+                    opt.tile_size = parse_u32_strict(argv[++i], "--tile-size");
                 } else if (a == "--max-error" && i + 1 < argc) {
-                    int me = std::atoi(argv[++i]);
-                    if (me < 0) throw std::runtime_error("--max-error must be >= 0");
-                    opt.max_error = static_cast<uint32_t>(me);
+                    opt.max_error = parse_u32_strict(argv[++i], "--max-error");
                 } else if (a == "--crc") {
                     opt.per_layer_crc = true;
                 } else if (a == "--threads" && i + 1 < argc) {
-                    opt.threads = std::max(1, std::atoi(argv[++i]));
+                    int nt = parse_int_strict(argv[++i], "--threads");
+                    if (nt < 1) throw std::runtime_error("--threads must be >= 1");
+                    opt.threads = nt;
                 } else if (a == "--verify") {
                     opt.verify = true;
                 } else if (a == "--no-verify") {
@@ -141,13 +182,19 @@ int main(int argc, char** argv) {
             bool bench = false;
             for (int i = 3; i < argc; ++i) {
                 std::string a = argv[i];
-                if (a == "--stop-layer" && i + 1 < argc) dopt.stop_layer = std::atoi(argv[++i]);
-                else if (a == "--max-level" && i + 1 < argc) dopt.max_level = std::atoi(argv[++i]);
-                else if (a == "--tile" && i + 1 < argc) {
-                    if (std::sscanf(argv[++i], "%d,%d", &dopt.tile_y, &dopt.tile_x) != 2)
-                        throw std::runtime_error("Bad --tile TY,TX");
-                } else if (a == "--threads" && i + 1 < argc) dopt.threads = std::max(1, std::atoi(argv[++i]));
-                else if (a == "--bench") bench = true;
+                if (a == "--stop-layer" && i + 1 < argc) {
+                    dopt.stop_layer = parse_int_strict(argv[++i], "--stop-layer");
+                    if (dopt.stop_layer < 0 || dopt.stop_layer > 15)
+                        throw std::runtime_error("--stop-layer must be in 0..15");
+                } else if (a == "--max-level" && i + 1 < argc) {
+                    dopt.max_level = parse_int_strict(argv[++i], "--max-level");
+                } else if (a == "--tile" && i + 1 < argc) {
+                    parse_tile_strict(argv[++i], dopt.tile_y, dopt.tile_x);
+                } else if (a == "--threads" && i + 1 < argc) {
+                    int nt = parse_int_strict(argv[++i], "--threads");
+                    if (nt < 1) throw std::runtime_error("--threads must be >= 1");
+                    dopt.threads = nt;
+                } else if (a == "--bench") bench = true;
                 else if (out_path.empty() && a[0] != '-') out_path = a;
                 else throw std::runtime_error("Unknown or incomplete option: " + a);
             }
@@ -167,7 +214,12 @@ int main(int argc, char** argv) {
             }
             size_t itemsize = (dec.dt_code == 3) ? 4u : 2u;
             size_t out_bytes = static_cast<size_t>(dec.d0) * dec.d1 * dec.d2 * itemsize;
-            const char* sha_str = dec.sha_checked ? (dec.sha_ok ? "PASS" : "FAIL") : "N/A (preview)";
+            const char* sha_str = "N/A (preview)";
+            if (dec.sha_checked) sha_str = dec.sha_ok ? "PASS" : "FAIL";
+            else if (dopt.stop_layer > 0 || dopt.max_level >= 0) sha_str = "N/A (preview)";
+            else if (dec.max_error > 0) sha_str = "N/A (near-lossless)";
+            else if (dopt.tile_y >= 0 || dopt.tile_x >= 0) sha_str = "N/A (single-tile)";
+            else if (out_path.empty()) sha_str = "N/A (no-out; CRC32C)";
             if (dec.version == 4) {
                 std::printf("DEC4 (%u,%u,%u) stop_layer=%d threads=%d: %zu -> %zu B  %.1f MB/s (%.3fs)  CRC32C=%s(%zu layers)  SHA256=%s\n",
                             dec.d0, dec.d1, dec.d2, dopt.stop_layer, dopt.threads, comp_sz, out_bytes,
@@ -181,11 +233,18 @@ int main(int argc, char** argv) {
             }
             return 0;
         } else if (cmd == "info") {
-            auto buf = read_file_bytes(argv[2]);
-            auto fi = hnd3::inspect(buf.data(), buf.size());
-            std::printf("HND%u shape=(%u,%u,%u) dtype=%u spec_ax=%u base_k=%u stripes=%u tiles=%ux%u(%ux%u) max_err=%u size=%zu B\n",
-                        fi.version, fi.d0, fi.d1, fi.d2, fi.dt_code, fi.spec_axis, fi.base_k, fi.n_stripes,
-                        fi.n_tiles_y, fi.n_tiles_x, fi.tile_h, fi.tile_w, fi.max_error, fi.file_bytes);
+            auto fi = hnd3::inspect_file(argv[2]);
+            if (fi.version == 4) {
+                const char* hcrc_s = fi.header_crc_checked ? (fi.header_crc_ok ? "PASS" : "FAIL") : "SKIP";
+                std::printf("HND4 shape=(%u,%u,%u) dtype=%u spec_ax=%u base_k=%u stripes=%u tiles=%ux%u(%ux%u) max_err=%u flags=0x%02x HeaderCRC32C=%s size=%zu B\n",
+                            fi.d0, fi.d1, fi.d2, fi.dt_code, fi.spec_axis, fi.base_k, fi.n_stripes,
+                            fi.n_tiles_y, fi.n_tiles_x, fi.tile_h, fi.tile_w, fi.max_error, fi.flags, hcrc_s, fi.file_bytes);
+                if (fi.header_crc_checked && !fi.header_crc_ok) return 1;
+            } else {
+                std::printf("HND%u shape=(%u,%u,%u) dtype=%u spec_ax=%u base_k=%u stripes=%u flags=0x%02x size=%zu B\n",
+                            fi.version, fi.d0, fi.d1, fi.d2, fi.dt_code, fi.spec_axis, fi.base_k, fi.n_stripes,
+                            fi.flags, fi.file_bytes);
+            }
             return 0;
 #ifdef HND3_ENABLE_FUZZ
         } else if (cmd == "fuzz") {

@@ -72,7 +72,7 @@ test: hnd2 libhnd3.a hnd3
 	$(CXX) -O2 -std=c++20 -Wall -Wextra -fsanitize=undefined -fno-sanitize-recover=all -pthread \
 	  cpp/hnd2.cpp -o /tmp/hnd2_test
 	$(CXX) -O2 -std=c++20 -Iinclude -Wall -Wextra -fsanitize=undefined -fno-sanitize-recover=all \
-	  -D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_DEBUG -DHND3_ENABLE_FUZZ -pthread \
+	  -D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_DEBUG -D_GLIBCXX_ASSERTIONS -DHND3_ENABLE_FUZZ -pthread \
 	  cpp/hnd3_lib.cpp cpp/hnd3_cli.cpp -o /tmp/hnd3_test
 	$(CXX) -O3 -std=c++20 -Iinclude -Wall -Wextra -pthread -DHND3_FORCE_SCALAR \
 	  cpp/hnd3_lib.cpp cpp/hnd3_cli.cpp -o /tmp/hnd3_scalar_test

@@ -6,7 +6,7 @@
 
 ## 1. End-to-End Single-Pass Streaming Pipeline
 
-Input is processed in `16 MB` flush groups (`flush_group_bytes`) with zero backward seeks. Any partial record trailing a transformed region at a flush-group boundary is carried forward in a tiny `carry` buffer (at most `unit_stride - 1` bytes) so adjacent flush groups remain anchored to the record grid without phase drift.
+Input is processed in `16 MiB` flush groups (`flush_group_bytes`) with zero backward seeks. Any partial record trailing a transformed region at a flush-group boundary is carried forward in a tiny `carry` buffer (at most `unit_stride - 1` bytes) so adjacent flush groups remain anchored to the record grid without phase drift.
 
 ```mermaid
 flowchart TD
@@ -14,8 +14,8 @@ flowchart TD
     FG --> S12["Coupled Stage 1 & 2: Online Probing, Viterbi DP & Verification"]
 
     S12 --> REG{"Verified Region Transform"}
-    REG -->|"T0 (Identity / Fallback)"| RAW_EMIT["Emit 4 MB Raw Blocks → raw_grp + Index Gear Anchors"]
-    REG -->|"T1 / T2_XOR / T2_ELEM / T2_BIT / T2_NIBROT"| XF_EMIT["Region-Anchored 4 MB Blocks → Forward NEON Kernel → xform_grp"]
+    REG -->|"T0 (Identity / Fallback)"| RAW_EMIT["Emit 4 MiB Raw Blocks → raw_grp + Index Gear Anchors"]
+    REG -->|"T1 / T2_XOR / T2_ELEM / T2_BIT / T2_NIBROT"| XF_EMIT["Region-Anchored 4 MiB Blocks → Forward NEON Kernel → xform_grp"]
 
     RAW_EMIT --> META_Q["Append 24 B MetaRecord(s) → meta_raw"]
     XF_EMIT --> CARRY["Tail (lt unit_stride): Carry Across Group or Emit to raw_grp at Region End"]
@@ -128,7 +128,7 @@ Zero backward seeks during encode and a single forward cursor during decode enab
 flowchart LR
     FH["FileHeader (8 B): magic='ASV3', ver=4, wlog=27, flags=0"] --> G1
 
-    subgraph G1["Flush Group k (Repeats for every 16 MB)"]
+    subgraph G1["Flush Group k (Repeats for every 16 MiB)"]
         GH["GroupHeader (21 B): tag=0x01, grp_uncomp, lm, lr, lx, ld=0"]
         PM["S_META (lm B): zstd flush block of 24 B MetaRecords"]
         PR["S_RAW (lr B): zstd flush block of T0 + tail bytes"]

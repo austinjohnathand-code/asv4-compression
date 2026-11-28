@@ -2,6 +2,7 @@ import hashlib
 import os
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -68,6 +69,7 @@ class TestPhase4Hnd4(unittest.TestCase):
                 )
                 self.assertIn("HND4 shape=", info.stdout)
                 self.assertIn("tiles=", info.stdout)
+                self.assertIn("HeaderCRC32C=PASS", info.stdout)
 
                 dec = subprocess.run(
                     [str(HND3_BIN), "dec", str(hnd4_f), str(raw_out), "--threads", "4"],
@@ -410,13 +412,91 @@ int main(void) {
             src = td / "test_c_abi.c"
             exe = td / "test_c_abi"
             src.write_text(c_src)
-            # Compile strictly as C99 (`cc -std=c99`) linking C++ static libhnd3.a!
+            # Compile strictly as C99 (`cc -std=c99`) linking C++ static libhnd3.a on both macOS and Linux!
+            cpp_rt = "-lc++" if sys.platform == "darwin" else "-lstdc++"
             subprocess.run(
                 ["cc", "-std=c99", "-O2", "-Wall", "-Wextra", f"-I{ROOT / 'include'}",
-                 str(src), str(LIB_A), "-lstdc++", "-lm", "-pthread", "-o", str(exe)],
+                 str(src), str(LIB_A), cpp_rt, "-lm", "-pthread", "-o", str(exe)],
                 check=True,
             )
             subprocess.run([str(exe)], check=True)
+
+    def test_dense_full_range_int32_multiband_and_strict_cli_and_info_crc(self):
+        # 1) Dense full-range ±1.9e9 int32 multi-band cube (specifically exercises unsigned __int128
+        #    cross-band EMA product in BOTH pack_rans_stripe and unpack_rans_stripe without int64 overflow!)
+        rng = np.random.default_rng(2026)
+        B, H, W = 12, 32, 32
+        base = rng.integers(-1900000000, 1900000000, size=(H, W), dtype="<i4")
+        cube = np.stack([
+            np.clip(base.astype(np.int64) + rng.integers(-50000000, 50000000, size=(H, W)),
+                    -2147483648, 2147483647).astype("<i4")
+            for _ in range(B)
+        ], axis=0)
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            ri = td / "dense_i32.raw"
+            cube.tofile(ri)
+            for tag, extra in [("v3_k0", ["--base-k", "0"]), ("v3_k6", ["--base-k", "6"]),
+                               ("v4_t16", ["--base-k", "6", "--tile-size", "16"])]:
+                hf = td / f"{tag}.hnd"
+                ro = td / f"{tag}.raw"
+                subprocess.run(
+                    [str(HND3_BIN), "enc", str(ri), str(hf), "--shape", f"{B},{H},{W}",
+                     "--dtype", "i32", "--threads", "2"] + extra,
+                    check=True, stdout=subprocess.DEVNULL,
+                )
+                subprocess.run([str(HND3_BIN), "dec", str(hf), str(ro), "--threads", "2"],
+                               check=True, stdout=subprocess.DEVNULL)
+                self.assertEqual(ri.read_bytes(), ro.read_bytes(), f"Dense int32 mismatch in {tag}")
+
+            # 2) Blind HND4 preserves FLAG_BLIND (0x01) and info reports HeaderCRC32C=PASS / rejects tampered header
+            c16 = np.zeros((16, 32, 32), dtype="<i2")
+            g = np.linspace(0, 1000, 32, dtype=np.float64)[:, None] + np.linspace(0, 800, 32)[None, :]
+            for b in range(16):
+                c16[b] = np.round((0.5 + 0.05 * b) * g + rng.normal(0, 4, (32, 32))).astype("<i2")
+            r16 = td / "c16.raw"
+            h4b = td / "c16_blind.hnd4"
+            d16 = td / "c16_dec.raw"
+            c16.tofile(r16)
+            subprocess.run(
+                [str(HND3_BIN), "enc", str(r16), str(h4b), "--blind", "--dtype", "i16",
+                 "--tile-size", "16", "--crc", "--threads", "2"],
+                check=True, stdout=subprocess.DEVNULL,
+            )
+            info_ok = subprocess.run([str(HND3_BIN), "info", str(h4b)], capture_output=True, text=True, check=True)
+            self.assertIn("HeaderCRC32C=PASS", info_ok.stdout)
+            self.assertIn("flags=0x19", info_ok.stdout)  # FLAG_BLIND(0x01)|FLAG_TILED(0x08)|FLAG_CRC32C(0x10)
+            subprocess.run([str(HND3_BIN), "dec", str(h4b), str(d16)], check=True, stdout=subprocess.DEVNULL)
+            self.assertEqual(r16.read_bytes(), d16.read_bytes())
+
+            # Tampered HND4 header -> hnd3 info must report HeaderCRC32C=FAIL and return non-zero!
+            bad = bytearray(h4b.read_bytes())
+            bad[50] ^= 0x01
+            h4_bad = td / "bad.hnd4"
+            h4_bad.write_bytes(bad)
+            info_bad = subprocess.run([str(HND3_BIN), "info", str(h4_bad)], capture_output=True, text=True)
+            self.assertNotEqual(info_bad.returncode, 0)
+            self.assertIn("HeaderCRC32C=FAIL", info_bad.stdout)
+
+            # 3) Strict CLI validation on hnd3 and asv4
+            for bad_args in [
+                [str(HND3_BIN), "enc", str(r16), str(td / "x.hnd3"), "--shape", "-1,32,32", "--dtype", "i16"],
+                [str(HND3_BIN), "enc", str(r16), str(td / "x.hnd3"), "--shape", "16,32,32xyz", "--dtype", "i16"],
+                [str(HND3_BIN), "enc", str(r16), str(td / "x.hnd3"), "--shape", "16,32,32", "--dtype", "i16", "--base-k", "abc"],
+                [str(HND3_BIN), "dec", str(h4b), str(td / "x.raw"), "--tile", "0,abc"],
+            ]:
+                r = subprocess.run(bad_args, capture_output=True, text=True)
+                self.assertNotEqual(r.returncode, 0, f"Expected CLI error for {bad_args}")
+            asv4_bin = ROOT / "asv4"
+            if asv4_bin.exists():
+                for bad_a in [
+                    [str(asv4_bin), "badmode", str(r16), str(td / "a.asv4")],
+                    [str(asv4_bin), "c", str(r16), str(td / "a.asv4"), "--block-mb", "0"],
+                    [str(asv4_bin), "c", str(r16), str(td / "a.asv4"), "--level", "99"],
+                ]:
+                    r = subprocess.run(bad_a, capture_output=True, text=True)
+                    self.assertNotEqual(r.returncode, 0, f"Expected asv4 CLI error for {bad_a}")
 
     def test_real_indian_pines_hnd4_tiled_and_near_lossless(self):
         mat_path = DATA_DIR / "Indian_pines.mat"
