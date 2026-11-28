@@ -47,9 +47,9 @@ flowchart LR
 
     FC -->|"Non-T0: consec ≥ 2, D_JS lt 0.12, i mod 8 ≠ 0"| FAST2["Fast-Confirm: Score {T0, active} (0.50x work)"]
     FC -->|"T0: consec ≥ 3, D_JS lt 0.04, i mod 4 ≠ 0"| FAST1["Fast-Confirm: Score {T0} only (0.25x work)"]
-    FC -->|"Full Sweep / D_JS Spike / Mismatch"| FULL["Full Two-Tier Probe (16 KB Base + 64 KB Wide)"]
+    FC -->|"Full Sweep / D_JS Spike / Mismatch"| FULL["Full Two-Tier Probe (16 KiB Base + 64 KiB Wide)"]
 
-    FAST2 -->|"Active Still Wins"| DP["1D Viterbi DP (p_switch=48 KB, JS-Modulated)"]
+    FAST2 -->|"Active Still Wins"| DP["1D Viterbi DP (p_switch=48 KiB, JS-Modulated)"]
     FAST2 -->|"Regime Changed"| FULL
     FAST1 --> DP
 
@@ -72,8 +72,8 @@ flowchart LR
 
     subgraph Safety["Three-Layer Anti-Regression Guard"]
         GATES --> LDM["Gear Rolling-Hash LDM Guard vs S_RAW History (reject if overlap ≥ 15%)"]
-        LDM --> Z3["2 x 256 KB Per-Plane zstd -3 Check (combined ≤ 0.94 & each ≤ z0 + 2048 B)"]
-        Z3 --> FLOOR["Net Savings Floor: ≥ 256 KB (or ≥ 128 KB warm-numeric if S_XFORM active)"]
+        LDM --> Z3["2 x 256 KiB Per-Plane zstd -3 Check (combined ≤ 0.94 & each ≤ z0 + 2048 B)"]
+        Z3 --> FLOOR["Net Savings Floor: ≥ 256 KiB (or ≥ 128 KiB warm-numeric if S_XFORM active)"]
     end
 
     FLOOR -->|"Pass"| ACC["Accept Transformed Region"]
@@ -82,8 +82,8 @@ flowchart LR
 
 ### Key Guardrails
 - **Miller-Madow $H_0$ Pre-Filter + Pinned Word Widths `{2, 4, 8}`**: Prevents finite-sample entropy bias where wider candidate multiples (`16, 32, 64`) artificially appear lower-entropy than true fundamental widths (`BF16/FP16`, `FP32/INT32`, `FP64/INT64`).
-- **Per-Plane `zstd -1` / `zstd -3` Scoring (`w ∈ [2, 8]`)**: Scores each byte plane independently (subtracting 12 B frame header per extra plane) so a 16 KB probe models the independent 128 KB zstd Huffman blocks of a 4 MB streaming block instead of averaging skewed exponent lanes with uniform mantissa lanes.
-- **Gear Rolling-Hash LDM Duplication Guard (`TrailingRawIndex`)**: Maintains a 32,768-anchor shift-invariant ring buffer (~256 KB RAM) indexed **only over bytes actually routed to `S_RAW`**. Prevents splitting duplicated Mach-O/ELF tables or VM snapshot pages out of `S_RAW` where `zstd --long=27` already deduplicates them.
+- **Per-Plane `zstd -1` / `zstd -3` Scoring (`w ∈ [2, 8]`)**: Scores each byte plane independently (subtracting 12 B frame header per extra plane) so a 16 KiB probe models the independent 128 KiB zstd Huffman blocks of a 4 MiB streaming block instead of averaging skewed exponent lanes with uniform mantissa lanes.
+- **Gear Rolling-Hash LDM Duplication Guard (`TrailingRawIndex`)**: Maintains a 32,768-anchor shift-invariant ring buffer (~256 KiB RAM) indexed **only over bytes actually routed to `S_RAW`**. Prevents splitting duplicated Mach-O/ELF tables or VM snapshot pages out of `S_RAW` where `zstd --long=27` already deduplicates them.
 - **Stationary Fast-Confirm Path**: Holds average Scoring Work Multiplier to **`0.89×`** (max **`2.06×`**, well inside the `≤ 3.0×` budget) across all 16 datasets.
 
 ---
@@ -116,7 +116,7 @@ flowchart LR
 ### Information-Theoretic & Systems Mechanism
 1. **Captures Exponent-Mantissa Mutual Information ($I(E_{4..0}; M_{\text{top}})$)**: In Gaussian neural weights ($\mathcal{N}(0, 0.02)$), the steep density decay across each exponent octave creates real coupling ($I(E_{4..0}; M_{6..4}) \approx +0.0523\text{ bits/bf16}$), while top exponent bits are virtually constant ($H(E_{7..5}) \approx 0$). Isolating `[E7..E0]` and `[M6..M0, S]` into separate lanes (as ZipNN and OpenZL `BFloat16Deconstruct` do) discards this coupling (`10.517 bits/bf16` theoretical byte-plane limit). `T2_NIBROT(2, h=0)` packs `[E4..E0 | M6..M4]` into a single byte's Huffman table (`5.465 b`) and `[M3..M0 | S, E7..E5]` into the other (`5.000 b`), reaching **`10.465 bits/bf16`**—beating ZipNN's theoretical byte-plane limit. On FP32 (`w = 4`), `T2_NIBROT(4, h=0)` similarly drops total byte-plane $H_0$ from `26.646` (`T1(4)`) to **`26.464 b/f32`** (`−0.182 b/f32`).
 2. **Eliminates Greedy `zstd -3` LZ77 False Matches**: Plain `T1` leaves a skewed ~10-symbol exponent lane (`H0 ≈ 2.68`) where `zstd -3` wastes bits emitting accidental 4-byte matches. Raising minimum plane entropy above `5.0 bits/byte` (~160 symbols) eliminates false matches so `zstd -3` stays in pure Huffman mode at **99.95% of Shannon entropy** and **`927–1,252 MB/s`** single-core decode.
-3. **Monotonic L19 Level Cap**: When `c_xform` initializes on a high-entropy `T2_NIBROT` group (`zstd -3` ratio `> 60%` of raw on the first 256 KB), `c_xform.cap_level_before_init(3)` prevents `ZSTD_btultra2` from chasing noisy long-range matches (`+6.38 MB` regression in `v4.0`), guaranteeing `L19 ≤ L3` across all 16 datasets.
+3. **Monotonic L19 Level Cap**: When `c_xform` initializes on a high-entropy `T2_NIBROT` group (`zstd -3` ratio `> 60%` of raw on the first 256 KiB), `c_xform.cap_level_before_init(3)` prevents `ZSTD_btultra2` from chasing noisy long-range matches (`+6.38 MiB` regression in `v4.0`), guaranteeing `L19 ≤ L3` across all 16 datasets.
 
 ---
 
@@ -178,7 +178,7 @@ sequenceDiagram
         Note over Enc: Cap uninitialized streams to wlog=26 if dual-stream active
         Enc->>Pipe: Write GroupHeader (ld=0) + S_META + S_RAW + S_XFORM
         Pipe->>Dec: Read GroupHeader (reject ld ≠ 0 or payload gt cap)
-        Dec->>Dec: LazyZstdDecoder decompress_append (linear 4 MB growth)
+        Dec->>Dec: LazyZstdDecoder decompress_append (linear 4 MiB growth)
         loop For each 24 B MetaRecord
             Dec->>Dec: Bounds check delta_op == 0, w ≥ 1, tail ≤ orig, r_pos & x_pos in range
             Dec->>Dec: Inverse NEON Transform (if non-T0) + Update SHA-256
