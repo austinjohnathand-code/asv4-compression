@@ -551,6 +551,145 @@ int main(void) {
             # E=2 must be substantially smaller than lossless
             self.assertLess(h4_e2.stat().st_size, int(h4.stat().st_size * 0.72))
 
+    def test_hnd4_sparse_hist_lut_fmt1_fmt2_progressive_blind_and_real_holdouts(self):
+        rng = np.random.default_rng(1337)
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+
+            # 1) fmt=1 sparse LUT (K <= 4096): smooth k^2 u16 & signed i16 (like Brain_MRI), untiled + tiled + progressive + blind
+            B, H, W = 12, 80, 84
+            grid = np.linspace(0, 120, H)[:, None] + np.linspace(0, 100, W)[None, :]
+            idx_u16 = np.clip(np.round(grid[None, :, :] + np.arange(B)[:, None, None] * 2 + rng.normal(0, 1.5, (B, H, W))), 0, 225).astype(np.int64)
+            sq_u16 = (idx_u16 * idx_u16).astype("<u2")
+            palette_u16 = set(np.unique(sq_u16).tolist())
+            # Signed i16 sparse values spanning negative & positive range: -30000 + 250 * k
+            sp_i16 = (-30000 + 250 * idx_u16).astype("<i2")
+            palette_i16 = set(np.unique(sp_i16).tolist())
+
+            for name, arr, dt_str, npdt, pal in [
+                ("sq_u16", sq_u16, "u16", "<u2", palette_u16),
+                ("sp_i16", sp_i16, "i16", "<i2", palette_i16),
+            ]:
+                ri = td / f"{name}.raw"
+                arr.tofile(ri)
+                # Auto LUT ON vs OFF comparison + tiled + progressive preview
+                h_on = td / f"{name}_on.hnd4"
+                h_off = td / f"{name}_off.hnd3"
+                h_tiled = td / f"{name}_tiled.hnd4"
+                dec_on = td / f"{name}_dec_on.raw"
+                dec_t = td / f"{name}_dec_t.raw"
+                dec_p = td / f"{name}_prev.raw"
+
+                e_on = subprocess.run(
+                    [str(HND3_BIN), "enc", str(ri), str(h_on), "--shape", f"{B},{H},{W}",
+                     "--dtype", dt_str, "--base-k", "6", "--threads", "4"],
+                    capture_output=True, text=True, check=True,
+                )
+                self.assertIn("ENC4", e_on.stdout)
+                self.assertNotIn("lut=0", e_on.stdout)
+                self.assertEqual(h_on.read_bytes()[:4], b"HND4")
+                info_on = subprocess.run([str(HND3_BIN), "info", str(h_on)], capture_output=True, text=True, check=True)
+                self.assertIn("HeaderCRC32C=PASS", info_on.stdout)
+                # FLAG_HIST_LUT = 0x40 must be set
+                flags_val = int(info_on.stdout.split("flags=0x")[1].split()[0], 16)
+                self.assertTrue(flags_val & 0x40)
+
+                e_off = subprocess.run(
+                    [str(HND3_BIN), "enc", str(ri), str(h_off), "--shape", f"{B},{H},{W}",
+                     "--dtype", dt_str, "--base-k", "6", "--hist-lut", "off", "--threads", "4"],
+                    capture_output=True, text=True, check=True,
+                )
+                self.assertEqual(h_off.read_bytes()[:4], b"HND3")
+                # LUT must drastically compress sparse-histogram cubes!
+                self.assertLess(h_on.stat().st_size, int(h_off.stat().st_size * 0.65))
+
+                d_on = subprocess.run([str(HND3_BIN), "dec", str(h_on), str(dec_on), "--threads", "4"],
+                                      capture_output=True, text=True, check=True)
+                self.assertIn("SHA256=PASS", d_on.stdout)
+                self.assertIn("CRC32C=PASS", d_on.stdout)
+                self.assertEqual(ri.read_bytes(), dec_on.read_bytes())
+
+                # Progressive preview (--stop-layer 6) maps cleanly back onto exact LUT palette!
+                d_p = subprocess.run([str(HND3_BIN), "dec", str(h_on), str(dec_p), "--stop-layer", "6", "--threads", "4"],
+                                     capture_output=True, text=True, check=True)
+                self.assertIn("CRC32C=PASS", d_p.stdout)
+                prev = np.fromfile(dec_p, dtype=npdt).reshape(B, H, W)
+                self.assertTrue(set(np.unique(prev).tolist()).issubset(pal))
+
+                # Tiled streaming encode + multi-column strip decode with LUT active
+                subprocess.run(
+                    [str(HND3_BIN), "enc", str(ri), str(h_tiled), "--shape", f"{B},{H},{W}",
+                     "--dtype", dt_str, "--base-k", "6", "--tile-size", "32", "--threads", "4"],
+                    check=True, stdout=subprocess.DEVNULL,
+                )
+                d_t = subprocess.run([str(HND3_BIN), "dec", str(h_tiled), str(dec_t), "--threads", "4"],
+                                     capture_output=True, text=True, check=True)
+                self.assertIn("SHA256=PASS", d_t.stdout)
+                self.assertEqual(ri.read_bytes(), dec_t.read_bytes())
+
+            # Blind mode auto-activates LUT on sparse sq_u16!
+            h_blind = td / "sq_blind.hnd4"
+            d_blind = td / "sq_blind.raw"
+            eb = subprocess.run(
+                [str(HND3_BIN), "enc", str(td / "sq_u16.raw"), str(h_blind), "--blind", "--dtype", "u16", "--threads", "4"],
+                capture_output=True, text=True, check=True,
+            )
+            self.assertNotIn("lut=0", eb.stdout)
+            subprocess.run([str(HND3_BIN), "dec", str(h_blind), str(d_blind), "--threads", "4"],
+                           check=True, stdout=subprocess.DEVNULL)
+            self.assertEqual((td / "sq_u16.raw").read_bytes(), d_blind.read_bytes())
+
+            # 2) fmt=2 bitmap LUT (K > 4096, e.g. K=5000 scattered multiples of 13 in u16)
+            B2, H2, W2 = 16, 128, 128  # 262,144 samples -> 8193 B bitmap = 0.25 b/s > 0.15 auto, so also test 524,288 samples!
+            B2 = 32  # 524,288 samples -> 8193*8/524288 = 0.125 b/s < 0.15 -> AUTO triggers fmt=2!
+            base2 = (np.linspace(0, 2400, H2)[:, None] + np.linspace(0, 2400, W2)[None, :])
+            idx2 = np.clip(np.round(base2[None, :, :] + np.arange(B2)[:, None, None] * 6 + rng.normal(0, 10, (B2, H2, W2))), 0, 4999).astype(np.int64)
+            # Ensure > 4096 unique multiples of 13 (0, 13, 26, ..., 64987)
+            idx2.flat[:5000] = np.arange(5000)
+            bm_u16 = (idx2 * 13).astype("<u2")
+            self.assertGreater(len(np.unique(bm_u16)), 4096)
+            ri2 = td / "bm_u16.raw"
+            h2 = td / "bm_u16.hnd4"
+            d2 = td / "bm_u16_dec.raw"
+            bm_u16.tofile(ri2)
+            e2 = subprocess.run(
+                [str(HND3_BIN), "enc", str(ri2), str(h2), "--shape", f"{B2},{H2},{W2}",
+                 "--dtype", "u16", "--base-k", "0", "--tile-size", "64", "--threads", "4"],
+                capture_output=True, text=True, check=True,
+            )
+            self.assertIn("lut=5000", e2.stdout)
+            d2r = subprocess.run([str(HND3_BIN), "dec", str(h2), str(d2), "--threads", "4"],
+                                 capture_output=True, text=True, check=True)
+            self.assertIn("SHA256=PASS", d2r.stdout)
+            self.assertEqual(ri2.read_bytes(), d2.read_bytes())
+
+            # 3) Real holdouts: Brain_MRI and Cells3D (if present) must trigger auto-LUT & hit target b/s!
+            brain_p = DATA_DIR / "brain.tiff"
+            cells_p = DATA_DIR / "cells3d.tif"
+            if brain_p.exists() and cells_p.exists():
+                import tifffile
+                brain = np.ascontiguousarray(tifffile.imread(brain_p).astype("<u2"))
+                cells = np.ascontiguousarray(tifffile.imread(cells_p)[:, 0, :, :].astype("<u2"))
+                for tag, arr, max_bps in [("brain", brain, 3.0), ("cells", cells, 9.1)]:
+                    ri_r = td / f"{tag}.raw"
+                    h_r = td / f"{tag}.hnd4"
+                    d_r = td / f"{tag}_dec.raw"
+                    arr.tofile(ri_r)
+                    sh = ",".join(map(str, arr.shape))
+                    er = subprocess.run(
+                        [str(HND3_BIN), "enc", str(ri_r), str(h_r), "--shape", sh,
+                         "--dtype", "u16", "--base-k", "0", "--threads", "4"],
+                        capture_output=True, text=True, check=True,
+                    )
+                    self.assertIn("ENC4", er.stdout)
+                    self.assertNotIn("lut=0", er.stdout)
+                    bps = h_r.stat().st_size * 8.0 / arr.size
+                    self.assertLess(bps, max_bps, f"{tag} got {bps:.3f} b/s >= {max_bps}")
+                    dr = subprocess.run([str(HND3_BIN), "dec", str(h_r), str(d_r), "--threads", "4"],
+                                        capture_output=True, text=True, check=True)
+                    self.assertIn("SHA256=PASS", dr.stdout)
+                    self.assertEqual(ri_r.read_bytes(), d_r.read_bytes())
+
 
 if __name__ == "__main__":
     unittest.main()

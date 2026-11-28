@@ -173,6 +173,7 @@ static constexpr uint8_t VERSION4           = 4;
 static constexpr uint8_t FLAG_TILED         = 1 << 3;
 static constexpr uint8_t FLAG_CRC32C        = 1 << 4;
 static constexpr uint8_t FLAG_NEAR_LOSSLESS = 1 << 5;
+static constexpr uint8_t FLAG_HIST_LUT      = 1 << 6;
 static constexpr size_t  HDR4_SIZE          = 84;
 static constexpr size_t  TILE_ENTRY_SIZE    = 8 + 4 + 16 * 4 + 16 * 4; // 140 B
 

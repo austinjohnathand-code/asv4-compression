@@ -76,7 +76,7 @@ int main(int argc, char** argv) {
                       << "  hnd3 enc <in.raw> <out.hnd3> (--shape D0,D1,D2 | --blind) --dtype u16|i16|i32\n"
                       << "           [--base-k 0..15] [--mode auto|full|clustered|none] [--levels 0..8]\n"
                       << "           [--stripes 1..64] [--spec-axis 0|1|2] [--tile-size T] [--max-error E]\n"
-                      << "           [--crc] [--threads N] [--no-verify]\n"
+                      << "           [--hist-lut auto|on|off] [--crc] [--threads N] [--no-verify]\n"
                       << "  hnd3 dec <in.hnd3> [out.raw] [--stop-layer K] [--max-level L] [--tile TY,TX]\n"
                       << "           [--threads N] [--bench]\n"
                       << "  hnd3 info <in.hnd3>\n";
@@ -120,6 +120,12 @@ int main(int argc, char** argv) {
                     opt.tile_size = parse_u32_strict(argv[++i], "--tile-size");
                 } else if (a == "--max-error" && i + 1 < argc) {
                     opt.max_error = parse_u32_strict(argv[++i], "--max-error");
+                } else if (a == "--hist-lut" && i + 1 < argc) {
+                    std::string hl = argv[++i];
+                    if (hl == "auto") opt.hist_lut = -1;
+                    else if (hl == "on") opt.hist_lut = 1;
+                    else if (hl == "off") opt.hist_lut = 0;
+                    else throw std::runtime_error("Bad --hist-lut (expected auto|on|off)");
                 } else if (a == "--crc") {
                     opt.per_layer_crc = true;
                 } else if (a == "--threads" && i + 1 < argc) {
@@ -153,15 +159,17 @@ int main(int argc, char** argv) {
                 std::printf("BLIND-ENC strides=[");
                 for (size_t i = 0; i < st.blind_strides.size(); ++i)
                     std::printf("%s%zu", i ? "," : "", st.blind_strides[i]);
-                std::printf("] shape=(%u,%u,%u) spec_ax=%d base_k=%u: %zu -> %zu B (%.3f b/s, %.2fx) %.1f MB/s (%.3fs) VERIFY=%s\n",
-                            st.d0, st.d1, st.d2, st.spec_axis, opt.base_k, st.raw_bytes, st.compressed_bytes,
+                std::printf("] shape=(%u,%u,%u) spec_ax=%d base_k=%u lut=%u: %zu -> %zu B (%.3f b/s, %.2fx) %.1f MB/s (%.3fs) VERIFY=%s\n",
+                            st.d0, st.d1, st.d2, st.spec_axis, opt.base_k,
+                            st.hist_lut_used ? st.hist_lut_unique : 0u, st.raw_bytes, st.compressed_bytes,
                             st.compressed_bytes * 8.0 / n_samp, double(st.raw_bytes) / st.compressed_bytes,
                             st.raw_bytes / 1e6 / std::max(st.encode_seconds, 1e-6), st.encode_seconds,
                             st.verified ? "PASS" : "SKIP");
             } else if (st.version == 4) {
-                std::printf("ENC4 (%u,%u,%u) tiles=%ux%u(%ux%u) base_k=%u max_err=%u threads=%d: %zu -> %zu B (%.3f b/s, %.2fx) %.1f MB/s (%.3fs) VERIFY=%s(Linf=%lld)\n",
+                std::printf("ENC4 (%u,%u,%u) tiles=%ux%u(%ux%u) base_k=%u max_err=%u lut=%u threads=%d: %zu -> %zu B (%.3f b/s, %.2fx) %.1f MB/s (%.3fs) VERIFY=%s(Linf=%lld)\n",
                             st.d0, st.d1, st.d2, st.n_tiles_y, st.n_tiles_x, st.tile_h, st.tile_w,
-                            opt.base_k, st.max_error, opt.threads, st.raw_bytes, st.compressed_bytes,
+                            opt.base_k, st.max_error, st.hist_lut_used ? st.hist_lut_unique : 0u,
+                            opt.threads, st.raw_bytes, st.compressed_bytes,
                             st.compressed_bytes * 8.0 / n_samp, double(st.raw_bytes) / st.compressed_bytes,
                             st.raw_bytes / 1e6 / std::max(st.encode_seconds, 1e-6), st.encode_seconds,
                             st.verified ? "PASS" : "SKIP", static_cast<long long>(st.verified_max_abs_err));

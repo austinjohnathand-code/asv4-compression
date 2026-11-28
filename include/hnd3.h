@@ -43,6 +43,7 @@ struct EncodeOptions {
     bool per_layer_crc = false; // true forces HND4 v4 with per-layer Castagnoli CRC32C
     bool blind = false;         // blind 1D stride + spectral-axis recovery
     bool verify = true;         // in-memory/streaming round-trip verification before returning
+    int8_t hist_lut = -1;       // -1 = auto (sparse 16-bit LUT compaction), 0 = off, 1 = force on
     int threads = 0;            // 0 = hardware_concurrency()
 };
 
@@ -58,6 +59,8 @@ struct EncodeStats {
     double encode_seconds = 0.0;
     int64_t verified_max_abs_err = 0;
     bool verified = false;
+    bool hist_lut_used = false;
+    uint32_t hist_lut_unique = 0;
 };
 
 struct DecodeOptions {

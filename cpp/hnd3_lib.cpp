@@ -73,6 +73,154 @@ static void validate_encode_opts(const EncodeOptions& opt) {
     if (opt.mode != "auto" && opt.mode != "full" && opt.mode != "clustered" && opt.mode != "none")
         throw std::runtime_error("Bad --mode (expected auto|full|clustered|none)");
     if (opt.max_error > 1073741823u) throw std::runtime_error("--max-error out of range");
+    if (opt.hist_lut < -1 || opt.hist_lut > 1) throw std::runtime_error("Invalid hist_lut option");
+}
+
+// =============================================================================
+// Reversible Monotonic Histogram Compaction LUT (HND4 FLAG_HIST_LUT)
+// =============================================================================
+struct HistLut {
+    bool enabled = false;
+    uint8_t dt_code = DT_I16;
+    uint32_t K = 0;
+    std::vector<int32_t> inv;   // dense idx [0..K-1] -> original i16/u16 value
+    std::vector<uint16_t> fwd;  // 65536-entry O(1) map (encoder only)
+    std::vector<uint8_t> bytes; // wire-serialized LUT prefix
+};
+
+static inline uint16_t hist_key(int64_t v, uint8_t dt_code) {
+    if (dt_code == DT_U16) return static_cast<uint16_t>(v & 0xFFFF);
+    return static_cast<uint16_t>(v + 32768);
+}
+
+static inline int32_t hist_unkey(uint16_t k, uint8_t dt_code) {
+    if (dt_code == DT_U16) return static_cast<int32_t>(k);
+    return static_cast<int32_t>(k) - 32768;
+}
+
+static void scan_hist_bits_mem(const uint8_t* raw, size_t n_bytes, uint8_t dt_code, std::array<uint8_t, 8192>& bits) {
+    bits.fill(0);
+    if (dt_code != DT_I16 && dt_code != DT_U16) return;
+    size_t n = n_bytes / 2;
+    for (size_t i = 0; i < n; ++i) {
+        uint16_t k = hist_key(read_sample_le(raw + i * 2, dt_code), dt_code);
+        bits[k >> 3] |= static_cast<uint8_t>(1u << (k & 7));
+    }
+}
+
+static HistLut build_hist_lut_from_bits(const std::array<uint8_t, 8192>& bits, uint8_t dt_code,
+                                        size_t tot_samples, int8_t hist_opt, uint32_t max_error) {
+    HistLut lut;
+    lut.dt_code = dt_code;
+    if ((dt_code != DT_I16 && dt_code != DT_U16) || max_error != 0 || hist_opt == 0 || tot_samples == 0)
+        return lut;
+
+    std::vector<uint16_t> keys;
+    keys.reserve(1024);
+    uint32_t adj_pairs = 0;
+    int prev_k = -2;
+    for (uint32_t b = 0; b < 8192; ++b) {
+        uint8_t byte = bits[b];
+        if (!byte) continue;
+        for (uint32_t bit = 0; bit < 8; ++bit) {
+            if ((byte >> bit) & 1u) {
+                int k = static_cast<int>((b << 3) | bit);
+                if (k == prev_k + 1) adj_pairs++;
+                prev_k = k;
+                keys.push_back(static_cast<uint16_t>(k));
+            }
+        }
+    }
+    uint32_t K = static_cast<uint32_t>(keys.size());
+    if (K == 0) return lut;
+    uint32_t span = static_cast<uint32_t>(keys.back()) - static_cast<uint32_t>(keys.front()) + 1u;
+    size_t wire_bytes = (K <= 4096u) ? (3u + 2u * K) : (1u + 8192u);
+
+    if (hist_opt < 0) {
+        // Auto-gate: activate ONLY on genuinely sparse 16-bit histograms (immune to single-pixel outliers
+        // and tiny test cubes; 0% trigger rate on dense hyperspectral cubes!).
+        if (K < 2) return lut;
+        if (K * 2u >= span) return lut;
+        if (adj_pairs * 2u >= (K - 1u)) return lut;
+        if (static_cast<double>(wire_bytes) * 8.0 / static_cast<double>(tot_samples) >= 0.15) return lut;
+    }
+
+    lut.enabled = true;
+    lut.K = K;
+    lut.inv.resize(K);
+    lut.fwd.assign(65536, 0);
+    for (uint32_t i = 0; i < K; ++i) {
+        lut.inv[i] = hist_unkey(keys[i], dt_code);
+        lut.fwd[keys[i]] = static_cast<uint16_t>(i);
+    }
+    lut.bytes.reserve(wire_bytes);
+    if (K <= 4096u) {
+        lut.bytes.push_back(1u);
+        write_le<uint16_t>(lut.bytes, static_cast<uint16_t>(K));
+        for (uint32_t i = 0; i < K; ++i) {
+            if (dt_code == DT_U16) write_le<uint16_t>(lut.bytes, static_cast<uint16_t>(lut.inv[i]));
+            else                   write_le<int16_t>(lut.bytes, static_cast<int16_t>(lut.inv[i]));
+        }
+    } else {
+        lut.bytes.push_back(2u);
+        lut.bytes.insert(lut.bytes.end(), bits.begin(), bits.end());
+    }
+    return lut;
+}
+
+static HistLut parse_hist_lut(const uint8_t* data, size_t& pos, size_t end_pos, uint8_t dt_code) {
+    if (dt_code != DT_I16 && dt_code != DT_U16)
+        throw std::runtime_error("FLAG_HIST_LUT invalid for non-16-bit dtype");
+    if (pos >= end_pos) throw std::runtime_error("Truncated HND4 histogram LUT header");
+    uint8_t fmt = data[pos++];
+    HistLut lut;
+    lut.enabled = true;
+    lut.dt_code = dt_code;
+    if (fmt == 1u) {
+        if (pos + 2 > end_pos) throw std::runtime_error("Truncated HND4 sparse LUT count");
+        uint16_t K = read_le<uint16_t>(data + pos); pos += 2;
+        if (K < 1 || K > 4096) throw std::runtime_error("Invalid HND4 sparse LUT K");
+        if (static_cast<size_t>(K) * 2 > end_pos - pos) throw std::runtime_error("Truncated HND4 sparse LUT values");
+        lut.K = K;
+        lut.inv.resize(K);
+        for (uint16_t i = 0; i < K; ++i) {
+            int32_t v = (dt_code == DT_U16) ? static_cast<int32_t>(read_le<uint16_t>(data + pos))
+                                            : static_cast<int32_t>(read_le<int16_t>(data + pos));
+            pos += 2;
+            if (i > 0 && v <= lut.inv[i - 1])
+                throw std::runtime_error("Non-monotonic HND4 sparse LUT");
+            lut.inv[i] = v;
+        }
+        return lut;
+    }
+    if (fmt == 2u) {
+        if (8192u > end_pos - pos) throw std::runtime_error("Truncated HND4 bitmap LUT");
+        lut.inv.reserve(16384);
+        for (uint32_t b = 0; b < 8192u; ++b) {
+            uint8_t byte = data[pos + b];
+            if (!byte) continue;
+            for (uint32_t bit = 0; bit < 8u; ++bit) {
+                if ((byte >> bit) & 1u)
+                    lut.inv.push_back(hist_unkey(static_cast<uint16_t>((b << 3) | bit), dt_code));
+            }
+        }
+        pos += 8192u;
+        if (lut.inv.empty()) throw std::runtime_error("Empty HND4 bitmap LUT");
+        lut.K = static_cast<uint32_t>(lut.inv.size());
+        return lut;
+    }
+    throw std::runtime_error("Unknown HND4 histogram LUT format");
+}
+
+static inline int64_t apply_hist_lut_fwd(int64_t v, const HistLut& lut) {
+    if (!lut.enabled) return v;
+    return static_cast<int64_t>(lut.fwd[hist_key(v, lut.dt_code)]);
+}
+
+static inline int64_t apply_hist_lut_inv(int64_t v, const HistLut& lut) {
+    if (!lut.enabled) return v;
+    int64_t idx = std::clamp<int64_t>(v, 0, static_cast<int64_t>(lut.K) - 1);
+    return static_cast<int64_t>(lut.inv[static_cast<size_t>(idx)]);
 }
 
 // =============================================================================
@@ -682,6 +830,7 @@ struct ParsedHnd4Meta {
     uint32_t max_error = 0, spec_len = 0, header_crc = 0;
     std::array<uint8_t, 32> sha{};
     int B = 0, H = 0, W = 0;
+    HistLut lut;
     SpectralModel sm;
     std::vector<TileIndexEntry> index;
     size_t payload_start = 0;
@@ -744,7 +893,13 @@ static ParsedHnd4Meta parse_hnd4_meta(const uint8_t* data, size_t len, uint64_t 
         if (c != m.header_crc) throw std::runtime_error("HND4 header/index CRC32C mismatch!");
     }
 
-    m.sm = parse_spectral_model(data, HDR4_SIZE, m.spec_len, m.spec_code, m.B);
+    size_t sp_pos = HDR4_SIZE;
+    size_t sp_end = HDR4_SIZE + m.spec_len;
+    if (m.flags & FLAG_HIST_LUT) {
+        if (m.max_error != 0) throw std::runtime_error("FLAG_HIST_LUT cannot combine with near-lossless max_error");
+        m.lut = parse_hist_lut(data, sp_pos, sp_end, m.dt_code);
+    }
+    m.sm = parse_spectral_model(data, sp_pos, sp_end - sp_pos, m.spec_code, m.B);
     m.index.resize(static_cast<size_t>(n_tiles));
     const uint8_t* ip = data + HDR4_SIZE + m.spec_len;
     for (size_t t = 0; t < static_cast<size_t>(n_tiles); ++t) {
@@ -937,10 +1092,47 @@ static std::array<uint8_t, 32> sha256_file_stream(const std::string& path) {
     return sha.digest();
 }
 
+static std::array<uint8_t, 32> sha256_and_hist_file_stream(const std::string& path, uint8_t dt_code,
+                                                           std::array<uint8_t, 8192>& bits, bool scan_hist) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) throw std::runtime_error("Cannot open file for SHA-256: " + path);
+    Sha256 sha;
+    bits.fill(0);
+    bool do_hist = scan_hist && (dt_code == DT_I16 || dt_code == DT_U16);
+    std::vector<uint8_t> buf(1 << 20); // 1 MiB (divisible by 2!)
+    uint8_t carry_byte = 0;
+    bool has_carry = false;
+    while (f) {
+        f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+        std::streamsize got = f.gcount();
+        if (got > 0) {
+            size_t n = static_cast<size_t>(got);
+            sha.update(buf.data(), n);
+            if (do_hist) {
+                size_t i = 0;
+                if (has_carry) {
+                    uint8_t pair[2] = {carry_byte, buf[0]};
+                    uint16_t k = hist_key(read_sample_le(pair, dt_code), dt_code);
+                    bits[k >> 3] |= static_cast<uint8_t>(1u << (k & 7));
+                    i = 1;
+                    has_carry = false;
+                }
+                for (; i + 1 < n; i += 2) {
+                    uint16_t k = hist_key(read_sample_le(buf.data() + i, dt_code), dt_code);
+                    bits[k >> 3] |= static_cast<uint8_t>(1u << (k & 7));
+                }
+                if (i < n) { carry_byte = buf[i]; has_carry = true; }
+            }
+        }
+    }
+    return sha.digest();
+}
+
 // Sample up to ~16,384 spatial pixels cleanly (bounded <16 MB RAM!) for shared global LDU-RKLT
 static std::vector<int64_t> sample_cube_for_ldu_file(std::ifstream& f, uint32_t /*d0*/, uint32_t d1, uint32_t d2,
                                                      uint8_t dt_code, uint8_t spec_axis,
-                                                     int B, int H, int W, uint32_t max_error, size_t& out_nsamp) {
+                                                     int B, int H, int W, uint32_t max_error,
+                                                     const HistLut& lut, size_t& out_nsamp) {
     int step_y = 1, step_x = 1;
     while (static_cast<size_t>((H + step_y - 1) / step_y) * ((W + step_x - 1) / step_x) > 16384u) {
         if (H / step_y >= W / step_x) step_y++;
@@ -960,8 +1152,10 @@ static std::vector<int64_t> sample_cube_for_ldu_file(std::ifstream& f, uint32_t 
                 f.seekg(static_cast<std::streamoff>(off));
                 f.read(reinterpret_cast<char*>(row.data()), static_cast<std::streamsize>(row.size()));
                 if (!f) throw std::runtime_error("Short read sampling BSQ cube for LDU");
-                for (int x = 0; x < W; x += step_x)
-                    X[static_cast<size_t>(b) * out_nsamp + k++] = nl_quant(read_sample_le(row.data() + x * itemsize, dt_code), max_error);
+                for (int x = 0; x < W; x += step_x) {
+                    int64_t v = read_sample_le(row.data() + x * itemsize, dt_code);
+                    X[static_cast<size_t>(b) * out_nsamp + k++] = lut.enabled ? apply_hist_lut_fwd(v, lut) : nl_quant(v, max_error);
+                }
             }
         }
     } else if (spec_axis == 1) {
@@ -973,8 +1167,10 @@ static std::vector<int64_t> sample_cube_for_ldu_file(std::ifstream& f, uint32_t 
                 f.read(reinterpret_cast<char*>(row.data()), static_cast<std::streamsize>(row.size()));
                 if (!f) throw std::runtime_error("Short read sampling BIL cube for LDU");
                 size_t base = static_cast<size_t>(b) * out_nsamp + static_cast<size_t>(y_i) * sx;
-                for (int x_i = 0, x = 0; x < W; x += step_x, ++x_i)
-                    X[base + x_i] = nl_quant(read_sample_le(row.data() + x * itemsize, dt_code), max_error);
+                for (int x_i = 0, x = 0; x < W; x += step_x, ++x_i) {
+                    int64_t v = read_sample_le(row.data() + x * itemsize, dt_code);
+                    X[base + x_i] = lut.enabled ? apply_hist_lut_fwd(v, lut) : nl_quant(v, max_error);
+                }
             }
         }
     } else {
@@ -986,8 +1182,10 @@ static std::vector<int64_t> sample_cube_for_ldu_file(std::ifstream& f, uint32_t 
                 f.seekg(static_cast<std::streamoff>(off));
                 f.read(reinterpret_cast<char*>(px.data()), static_cast<std::streamsize>(px.size()));
                 if (!f) throw std::runtime_error("Short read sampling BIP cube for LDU");
-                for (int b = 0; b < B; ++b)
-                    X[static_cast<size_t>(b) * out_nsamp + k] = nl_quant(read_sample_le(px.data() + b * itemsize, dt_code), max_error);
+                for (int b = 0; b < B; ++b) {
+                    int64_t v = read_sample_le(px.data() + b * itemsize, dt_code);
+                    X[static_cast<size_t>(b) * out_nsamp + k] = lut.enabled ? apply_hist_lut_fwd(v, lut) : nl_quant(v, max_error);
+                }
                 k++;
             }
         }
@@ -1023,6 +1221,12 @@ static std::vector<uint8_t> encode_hnd4_buffer(const uint8_t* raw_bytes, size_t 
         throw std::runtime_error("HND4 tile count exceeds 65536 limit (increase --tile-size)");
     size_t n_tiles = static_cast<size_t>(n_tiles64);
 
+    // Check reversible monotonic histogram compaction LUT (16-bit lossless only)
+    std::array<uint8_t, 8192> hist_bits{};
+    if (opt.hist_lut != 0 && opt.max_error == 0 && (dt_code == DT_I16 || dt_code == DT_U16))
+        scan_hist_bits_mem(raw_bytes, n_bytes, dt_code, hist_bits);
+    auto lut = build_hist_lut_from_bits(hist_bits, dt_code, tot, opt.hist_lut, opt.max_error);
+
     // Sample up to 16K spatial pixels for shared global LDU-RKLT
     int step_y = 1, step_x = 1;
     while (static_cast<size_t>((H + step_y - 1) / step_y) * ((W + step_x - 1) / step_x) > 16384u) {
@@ -1040,21 +1244,28 @@ static std::vector<uint8_t> encode_hnd4_buffer(const uint8_t* raw_bytes, size_t 
                 else if (opt.spec_axis == 1) { i0 = y; i1 = b; i2 = x; }
                 else                         { i0 = y; i1 = x; i2 = b; }
                 size_t idx = (static_cast<size_t>(i0) * d1 + i1) * d2 + i2;
-                Xs[static_cast<size_t>(b) * nsamp + k++] = nl_quant(read_sample_le(raw_bytes + idx * itemsize, dt_code), opt.max_error);
+                int64_t v = read_sample_le(raw_bytes + idx * itemsize, dt_code);
+                Xs[static_cast<size_t>(b) * nsamp + k++] = lut.enabled ? apply_hist_lut_fwd(v, lut) : nl_quant(v, opt.max_error);
             }
         }
     }
     auto sm = fit_spectral_model(Xs.data(), B, nsamp, tot, opt.mode, use_i32_neon, n_threads);
     Xs.clear(); Xs.shrink_to_fit();
 
+    std::vector<uint8_t> spec_blob;
+    spec_blob.reserve(lut.bytes.size() + sm.bytes.size());
+    spec_blob.insert(spec_blob.end(), lut.bytes.begin(), lut.bytes.end());
+    spec_blob.insert(spec_blob.end(), sm.bytes.begin(), sm.bytes.end());
+
     auto sha = sha256_bytes(raw_bytes, n_bytes);
     uint8_t flags = FLAG_CRC32C | extra_flags;
     if (n_tiles > 1) flags |= FLAG_TILED;
     if (opt.max_error > 0) flags |= FLAG_NEAR_LOSSLESS | FLAG_LOSSY;
+    if (lut.enabled) flags |= FLAG_HIST_LUT;
 
     std::vector<TileIndexEntry> index(n_tiles);
     std::vector<uint8_t> all_tile_payloads;
-    size_t payload_base = HDR4_SIZE + sm.bytes.size() + n_tiles * TILE_ENTRY_SIZE;
+    size_t payload_base = HDR4_SIZE + spec_blob.size() + n_tiles * TILE_ENTRY_SIZE;
     int64_t max_verified_err = 0;
 
     for (uint32_t ty = 0; ty < n_ty; ++ty) {
@@ -1069,7 +1280,9 @@ static std::vector<uint8_t> encode_hnd4_buffer(const uint8_t* raw_bytes, size_t 
             std::vector<int64_t> orig_tile(static_cast<size_t>(B) * tHW);
             extract_tile_from_mem(raw_bytes, d0, d1, d2, dt_code, opt.spec_axis, B, y0, th, x0, tw, orig_tile.data());
             std::vector<int64_t> work = orig_tile;
-            if (opt.max_error > 0) {
+            if (lut.enabled) {
+                for (int64_t& v : work) v = apply_hist_lut_fwd(v, lut);
+            } else if (opt.max_error > 0) {
                 for (int64_t& v : work) v = nl_quant(v, opt.max_error);
             }
             apply_spectral_forward(work.data(), B, tHW, sm, use_i32_neon, n_threads);
@@ -1082,7 +1295,8 @@ static std::vector<uint8_t> encode_hnd4_buffer(const uint8_t* raw_bytes, size_t 
                                                 et.layer_bytes.data(), et.layer_crc.data(), true, lc, n_threads);
                 apply_spectral_inverse(dec_w.data(), B, tHW, sm, use_i32_neon, n_threads);
                 for (size_t i = 0; i < orig_tile.size(); ++i) {
-                    int64_t rec_v = nl_dequant(dec_w[i], opt.max_error, dt_code);
+                    int64_t rec_v = lut.enabled ? apply_hist_lut_inv(dec_w[i], lut)
+                                                : nl_dequant(dec_w[i], opt.max_error, dt_code);
                     int64_t e = std::abs(orig_tile[i] - rec_v);
                     if (e > max_verified_err) max_verified_err = e;
                     if (e > static_cast<int64_t>(opt.max_error))
@@ -1102,16 +1316,16 @@ static std::vector<uint8_t> encode_hnd4_buffer(const uint8_t* raw_bytes, size_t 
     pack_tile_index(idx_buf, index);
     pack_hnd4_header(hdr, flags, dt_code, sm.spec_code, opt.levels, opt.spec_axis, opt.base_k, n_stripes,
                      d0, d1, d2, tile_h, tile_w, n_ty, n_tx, opt.max_error, sha,
-                     static_cast<uint32_t>(sm.bytes.size()), 0u);
+                     static_cast<uint32_t>(spec_blob.size()), 0u);
     uint32_t hcrc = crc32c_impl(hdr.data(), HDR4_SIZE - 4, 0u);
-    hcrc = crc32c_impl(sm.bytes.data(), sm.bytes.size(), hcrc);
+    hcrc = crc32c_impl(spec_blob.data(), spec_blob.size(), hcrc);
     hcrc = crc32c_impl(idx_buf.data(), idx_buf.size(), hcrc);
     std::memcpy(hdr.data() + HDR4_SIZE - 4, &hcrc, 4);
 
     std::vector<uint8_t> out;
-    out.reserve(HDR4_SIZE + sm.bytes.size() + idx_buf.size() + all_tile_payloads.size());
+    out.reserve(HDR4_SIZE + spec_blob.size() + idx_buf.size() + all_tile_payloads.size());
     out.insert(out.end(), hdr.begin(), hdr.end());
-    out.insert(out.end(), sm.bytes.begin(), sm.bytes.end());
+    out.insert(out.end(), spec_blob.begin(), spec_blob.end());
     out.insert(out.end(), idx_buf.begin(), idx_buf.end());
     out.insert(out.end(), all_tile_payloads.begin(), all_tile_payloads.end());
 
@@ -1121,6 +1335,7 @@ static std::vector<uint8_t> encode_hnd4_buffer(const uint8_t* raw_bytes, size_t 
         st_out->max_error = opt.max_error; st_out->spec_axis = opt.spec_axis;
         st_out->raw_bytes = n_bytes; st_out->compressed_bytes = out.size();
         st_out->verified = opt.verify; st_out->verified_max_abs_err = max_verified_err;
+        st_out->hist_lut_used = lut.enabled; st_out->hist_lut_unique = lut.K;
     }
     return out;
 }
@@ -1182,7 +1397,9 @@ static DecodedCube decode_hnd4_buffer(const uint8_t* data, size_t len, const Dec
                                            e.layer_bytes.data(), e.layer_crc.data(),
                                            opt.verify_crc, res.crc_layers_verified, n_threads);
             apply_spectral_inverse(work.data(), m.B, static_cast<size_t>(th) * tw, m.sm, use_i32_neon, n_threads);
-            if (m.max_error > 0) {
+            if (m.lut.enabled) {
+                for (int64_t& v : work) v = apply_hist_lut_inv(v, m.lut);
+            } else if (m.max_error > 0) {
                 for (int64_t& v : work) v = nl_dequant(v, m.max_error, m.dt_code);
             }
             if (single_tile) {
@@ -1233,8 +1450,17 @@ std::vector<uint8_t> encode(const uint8_t* raw_bytes, size_t n_bytes,
             size_t s1 = rec[1], s2 = rec[2];
             size_t d0 = n / s2, d1 = s2 / s1, d2 = s1;
             if (d0 * d1 * d2 == n && d0 >= 2 && d1 >= 4 && d2 >= 4) {
+                // Check sparse-histogram compaction LUT before spectral-axis scoring!
+                std::array<uint8_t, 8192> hb{};
+                if (opt.hist_lut != 0 && opt.max_error == 0 && (dt_code == DT_I16 || dt_code == DT_U16))
+                    scan_hist_bits_mem(raw_bytes, n_bytes, dt_code, hb);
+                auto lut_chk = build_hist_lut_from_bits(hb, dt_code, n, opt.hist_lut, opt.max_error);
+
                 std::vector<int64_t> xi(n);
-                for (size_t i = 0; i < n; ++i) xi[i] = read_sample_le(raw_bytes + i * itemsize, dt_code);
+                for (size_t i = 0; i < n; ++i) {
+                    int64_t v = read_sample_le(raw_bytes + i * itemsize, dt_code);
+                    xi[i] = lut_chk.enabled ? apply_hist_lut_fwd(v, lut_chk) : v;
+                }
                 int sp_ax = choose_spectral_axis_cpp(xi.data(), static_cast<uint32_t>(d0),
                                                      static_cast<uint32_t>(d1), static_cast<uint32_t>(d2), n_threads);
                 xi.clear(); xi.shrink_to_fit();
@@ -1247,8 +1473,9 @@ std::vector<uint8_t> encode(const uint8_t* raw_bytes, size_t n_bytes,
                 resolved.mode = (sp_ax < 0) ? "none" : opt.mode;
                 local_st.d0 = resolved.d0; local_st.d1 = resolved.d1; local_st.d2 = resolved.d2;
                 local_st.spec_axis = sp_ax;
-                if (resolved.tile_size > 0 || resolved.max_error > 0 || resolved.per_layer_crc) {
+                if (resolved.tile_size > 0 || resolved.max_error > 0 || resolved.per_layer_crc || lut_chk.enabled) {
                     blob = encode_hnd4_buffer(raw_bytes, n_bytes, resolved, &local_st, FLAG_BLIND);
+                    local_st.spec_axis = sp_ax;
                 } else {
                     blob = encode_hnd3_v3(raw_bytes, resolved.d0, resolved.d1, resolved.d2, dt_code,
                                           resolved.mode, resolved.levels, resolved.spec_axis,
@@ -1287,7 +1514,14 @@ std::vector<uint8_t> encode(const uint8_t* raw_bytes, size_t n_bytes,
                                      std::to_string(tot64 * opt.d2 * itemsize) + " B)");
         local_st.d0 = opt.d0; local_st.d1 = opt.d1; local_st.d2 = opt.d2;
         local_st.spec_axis = opt.spec_axis;
-        if (opt.tile_size > 0 || opt.max_error > 0 || opt.per_layer_crc) {
+        bool auto_lut = false;
+        if (opt.tile_size == 0 && opt.max_error == 0 && !opt.per_layer_crc &&
+            opt.hist_lut != 0 && (dt_code == DT_I16 || dt_code == DT_U16)) {
+            std::array<uint8_t, 8192> hb{};
+            scan_hist_bits_mem(raw_bytes, n_bytes, dt_code, hb);
+            auto_lut = build_hist_lut_from_bits(hb, dt_code, static_cast<size_t>(tot64 * opt.d2), opt.hist_lut, 0).enabled;
+        }
+        if (opt.tile_size > 0 || opt.max_error > 0 || opt.per_layer_crc || auto_lut) {
             blob = encode_hnd4_buffer(raw_bytes, n_bytes, opt, &local_st);
         } else {
             blob = encode_hnd3_v3(raw_bytes, opt.d0, opt.d1, opt.d2, dt_code, opt.mode,
@@ -1391,7 +1625,7 @@ FileInfo inspect_file(const std::string& path) {
 // =============================================================================
 EncodeStats encode_file(const std::string& in_path, const std::string& out_path, const EncodeOptions& opt) {
     validate_encode_opts(opt);
-    bool use_streaming_hnd4 = (!opt.blind) && (opt.tile_size > 0 || opt.max_error > 0 || opt.per_layer_crc);
+    bool use_streaming_hnd4 = (!opt.blind) && (opt.tile_size > 0 || opt.max_error > 0 || opt.per_layer_crc || opt.hist_lut == 1);
     if (!use_streaming_hnd4) {
         std::ifstream fin(in_path, std::ios::binary | std::ios::ate);
         if (!fin) throw std::runtime_error("Cannot open input file: " + in_path);
@@ -1446,19 +1680,27 @@ EncodeStats encode_file(const std::string& in_path, const std::string& out_path,
 
     auto t0 = std::chrono::steady_clock::now();
 
-    // Pass 1: Strided <16 MB sample -> ONE shared global LDU-RKLT model!
+    // Pass 1: Single streaming 1 MiB pass for SHA-256 + 8 KB sparse-histogram presence bitset!
+    std::array<uint8_t, 8192> hist_bits{};
+    bool scan_hist = (opt.hist_lut != 0 && opt.max_error == 0 && (dt_code == DT_I16 || dt_code == DT_U16));
+    auto sha = sha256_and_hist_file_stream(in_path, dt_code, hist_bits, scan_hist);
+    auto lut = build_hist_lut_from_bits(hist_bits, dt_code, static_cast<size_t>(tot64), opt.hist_lut, opt.max_error);
+
+    // Pass 2: Strided <16 MB sample -> ONE shared global LDU-RKLT model!
     size_t nsamp = 0;
-    auto Xs = sample_cube_for_ldu_file(fin, opt.d0, opt.d1, opt.d2, dt_code, opt.spec_axis, B, H, W, opt.max_error, nsamp);
+    auto Xs = sample_cube_for_ldu_file(fin, opt.d0, opt.d1, opt.d2, dt_code, opt.spec_axis, B, H, W, opt.max_error, lut, nsamp);
     auto sm = fit_spectral_model(Xs.data(), B, nsamp, static_cast<size_t>(tot64), opt.mode, use_i32_neon, n_threads);
     Xs.clear(); Xs.shrink_to_fit();
 
-    // Streaming SHA-256 of raw input in 1 MB chunks
-    auto sha = sha256_file_stream(in_path);
+    std::vector<uint8_t> spec_blob;
+    spec_blob.reserve(lut.bytes.size() + sm.bytes.size());
+    spec_blob.insert(spec_blob.end(), lut.bytes.begin(), lut.bytes.end());
+    spec_blob.insert(spec_blob.end(), sm.bytes.begin(), sm.bytes.end());
 
-    // Reserve header + spec_bytes + tile index table on disk, then stream tiles one-by-one!
+    // Reserve header + spec_blob + tile index table on disk, then stream tiles one-by-one!
     std::fstream fout(out_path, std::ios::binary | std::ios::out | std::ios::trunc);
     if (!fout) throw std::runtime_error("Cannot open output file: " + out_path);
-    std::vector<uint8_t> placeholder(HDR4_SIZE + sm.bytes.size() + n_tiles * TILE_ENTRY_SIZE, 0);
+    std::vector<uint8_t> placeholder(HDR4_SIZE + spec_blob.size() + n_tiles * TILE_ENTRY_SIZE, 0);
     fout.write(reinterpret_cast<const char*>(placeholder.data()), static_cast<std::streamsize>(placeholder.size()));
     uint64_t cur_off = placeholder.size();
     placeholder.clear(); placeholder.shrink_to_fit();
@@ -1480,7 +1722,9 @@ EncodeStats encode_file(const std::string& in_path, const std::string& out_path,
 
             std::vector<int64_t> work = orig_tile;
             if (!opt.verify) { orig_tile.clear(); orig_tile.shrink_to_fit(); }
-            if (opt.max_error > 0) {
+            if (lut.enabled) {
+                for (int64_t& v : work) v = apply_hist_lut_fwd(v, lut);
+            } else if (opt.max_error > 0) {
                 for (int64_t& v : work) v = nl_quant(v, opt.max_error);
             }
             apply_spectral_forward(work.data(), B, tHW, sm, use_i32_neon, n_threads);
@@ -1494,7 +1738,8 @@ EncodeStats encode_file(const std::string& in_path, const std::string& out_path,
                                                 et.layer_bytes.data(), et.layer_crc.data(), true, lc, n_threads);
                 apply_spectral_inverse(dec_w.data(), B, tHW, sm, use_i32_neon, n_threads);
                 for (size_t i = 0; i < orig_tile.size(); ++i) {
-                    int64_t rec_v = nl_dequant(dec_w[i], opt.max_error, dt_code);
+                    int64_t rec_v = lut.enabled ? apply_hist_lut_inv(dec_w[i], lut)
+                                                : nl_dequant(dec_w[i], opt.max_error, dt_code);
                     int64_t e = std::abs(orig_tile[i] - rec_v);
                     if (e > max_verified_err) max_verified_err = e;
                     if (e > static_cast<int64_t>(opt.max_error))
@@ -1515,21 +1760,22 @@ EncodeStats encode_file(const std::string& in_path, const std::string& out_path,
     uint8_t flags = FLAG_CRC32C;
     if (n_tiles > 1) flags |= FLAG_TILED;
     if (opt.max_error > 0) flags |= FLAG_NEAR_LOSSLESS | FLAG_LOSSY;
+    if (lut.enabled) flags |= FLAG_HIST_LUT;
 
     std::vector<uint8_t> idx_buf, hdr;
     pack_tile_index(idx_buf, index);
     pack_hnd4_header(hdr, flags, dt_code, sm.spec_code, opt.levels, opt.spec_axis, opt.base_k, n_stripes,
                      opt.d0, opt.d1, opt.d2, tile_h, tile_w, n_ty, n_tx, opt.max_error, sha,
-                     static_cast<uint32_t>(sm.bytes.size()), 0u);
+                     static_cast<uint32_t>(spec_blob.size()), 0u);
     uint32_t hcrc = crc32c_impl(hdr.data(), HDR4_SIZE - 4, 0u);
-    hcrc = crc32c_impl(sm.bytes.data(), sm.bytes.size(), hcrc);
+    hcrc = crc32c_impl(spec_blob.data(), spec_blob.size(), hcrc);
     hcrc = crc32c_impl(idx_buf.data(), idx_buf.size(), hcrc);
     std::memcpy(hdr.data() + HDR4_SIZE - 4, &hcrc, 4);
 
     fout.seekp(0);
     fout.write(reinterpret_cast<const char*>(hdr.data()), static_cast<std::streamsize>(hdr.size()));
-    if (!sm.bytes.empty())
-        fout.write(reinterpret_cast<const char*>(sm.bytes.data()), static_cast<std::streamsize>(sm.bytes.size()));
+    if (!spec_blob.empty())
+        fout.write(reinterpret_cast<const char*>(spec_blob.data()), static_cast<std::streamsize>(spec_blob.size()));
     fout.write(reinterpret_cast<const char*>(idx_buf.data()), static_cast<std::streamsize>(idx_buf.size()));
     fout.flush();
 
@@ -1540,6 +1786,7 @@ EncodeStats encode_file(const std::string& in_path, const std::string& out_path,
     st.raw_bytes = file_sz; st.compressed_bytes = static_cast<size_t>(cur_off);
     st.encode_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     st.verified = opt.verify; st.verified_max_abs_err = max_verified_err;
+    st.hist_lut_used = lut.enabled; st.hist_lut_unique = lut.K;
     return st;
 }
 
@@ -1642,6 +1889,16 @@ DecodedCube decode_file(const std::string& in_path, const std::string& out_path,
         }
     }
 
+    // Multi-column tile-row strip write buffer (<= 64 MiB cap):
+    // Converts O(B * H * n_tx) fragmented row seeks into B contiguous band writes per tile-row (BSQ)
+    // or 1 contiguous write per tile-row (BIL/BIP) — e.g. 512x fewer syscalls on AVIRIS tile=128!
+    unsigned __int128 max_strip_bytes128 =
+        static_cast<unsigned __int128>(m.B) * m.tile_h * m.W * itemsize;
+    bool use_row_strip = (!single_tile && !out_path.empty() && m.n_tx > 1 &&
+                          max_strip_bytes128 > 0 && max_strip_bytes128 <= (64ULL << 20));
+    std::vector<uint8_t> row_strip;
+    if (use_row_strip) row_strip.resize(static_cast<size_t>(max_strip_bytes128));
+
     for (uint32_t ty = ty0; ty < ty1; ++ty) {
         int y0 = static_cast<int>(ty * m.tile_h), th = std::min<int>(static_cast<int>(m.tile_h), m.H - y0);
         for (uint32_t tx = tx0; tx < tx1; ++tx) {
@@ -1665,10 +1922,52 @@ DecodedCube decode_file(const std::string& in_path, const std::string& out_path,
                                            opt.verify_crc, res.crc_layers_verified, n_threads);
             tbuf.clear(); tbuf.shrink_to_fit();
             apply_spectral_inverse(work.data(), m.B, static_cast<size_t>(th) * tw, m.sm, use_i32_neon, n_threads);
-            if (m.max_error > 0) {
+            if (m.lut.enabled) {
+                for (int64_t& v : work) v = apply_hist_lut_inv(v, m.lut);
+            } else if (m.max_error > 0) {
                 for (int64_t& v : work) v = nl_dequant(v, m.max_error, m.dt_code);
             }
-            if (!out_path.empty()) {
+            if (use_row_strip) {
+                const bool clamp_val = !is_lossless;
+                size_t tHW = static_cast<size_t>(th) * tw;
+                if (m.spec_axis == 0) {
+                    parallel_for(static_cast<size_t>(m.B), n_threads, [&](size_t b0, size_t b1) {
+                        for (size_t b = b0; b < b1; ++b) {
+                            size_t band_base = b * static_cast<size_t>(th) * m.W;
+                            const int64_t* src_b = work.data() + b * tHW;
+                            for (int y = 0; y < th; ++y) {
+                                uint8_t* dp = row_strip.data() + (band_base + static_cast<size_t>(y) * m.W + x0) * itemsize;
+                                const int64_t* sp = src_b + static_cast<size_t>(y) * tw;
+                                for (int x = 0; x < tw; ++x)
+                                    write_sample_le(dp + x * itemsize, sp[x], m.dt_code, clamp_val);
+                            }
+                        }
+                    });
+                } else if (m.spec_axis == 1) {
+                    parallel_for(static_cast<size_t>(th), n_threads, [&](size_t ys0, size_t ys1) {
+                        for (size_t y = ys0; y < ys1; ++y) {
+                            for (int b = 0; b < m.B; ++b) {
+                                uint8_t* dp = row_strip.data() + ((y * m.B + b) * m.W + x0) * itemsize;
+                                const int64_t* sp = work.data() + static_cast<size_t>(b) * tHW + y * tw;
+                                for (int x = 0; x < tw; ++x)
+                                    write_sample_le(dp + x * itemsize, sp[x], m.dt_code, clamp_val);
+                            }
+                        }
+                    });
+                } else {
+                    parallel_for(static_cast<size_t>(th), n_threads, [&](size_t ys0, size_t ys1) {
+                        for (size_t y = ys0; y < ys1; ++y) {
+                            for (int x = 0; x < tw; ++x) {
+                                uint8_t* dp = row_strip.data() + ((y * m.W + (x0 + x)) * m.B) * itemsize;
+                                for (int b = 0; b < m.B; ++b)
+                                    write_sample_le(dp + static_cast<size_t>(b) * itemsize,
+                                                    work[static_cast<size_t>(b) * tHW + y * tw + x],
+                                                    m.dt_code, clamp_val);
+                            }
+                        }
+                    });
+                }
+            } else if (!out_path.empty()) {
                 if (single_tile) {
                     scatter_tile_to_file(work.data(), fout, res.d0, res.d1, res.d2,
                                          m.dt_code, m.spec_axis, m.B, 0, th, 0, tw, !is_lossless);
@@ -1685,6 +1984,23 @@ DecodedCube decode_file(const std::string& in_path, const std::string& out_path,
                 res.sha_ok = (sha256_bytes(tmp.data(), tmp.size()) == m.sha);
                 if (!res.sha_ok) throw std::runtime_error("SHA-256 verification FAILED on single-tile HND4 decode!");
             }
+        }
+        if (use_row_strip) {
+            if (m.spec_axis == 0) {
+                size_t band_strip_bytes = static_cast<size_t>(th) * m.W * itemsize;
+                for (int b = 0; b < m.B; ++b) {
+                    size_t off = ((static_cast<size_t>(b) * m.d1 + y0) * m.d2) * itemsize;
+                    fout.seekp(static_cast<std::streamoff>(off));
+                    fout.write(reinterpret_cast<const char*>(row_strip.data() + static_cast<size_t>(b) * band_strip_bytes),
+                               static_cast<std::streamsize>(band_strip_bytes));
+                }
+            } else {
+                size_t strip_bytes = static_cast<size_t>(th) * m.B * m.W * itemsize;
+                size_t off = (static_cast<size_t>(y0) * m.d1 * m.d2) * itemsize;
+                fout.seekp(static_cast<std::streamoff>(off));
+                fout.write(reinterpret_cast<const char*>(row_strip.data()), static_cast<std::streamsize>(strip_bytes));
+            }
+            if (!fout) throw std::runtime_error("I/O error writing decoded HND4 tile-row strip");
         }
     }
     if (fout.is_open()) { fout.flush(); fout.close(); }
